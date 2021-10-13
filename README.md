@@ -12,7 +12,7 @@ This project aims to bring back a productive working environment on Windows 11.
 Screenshots: [<1>](https://gist.githubusercontent.com/valinet/d0f72ff09773702584e77c46065b95e0/raw/94036ed3e38218b87744a29ae5c40b06be637daf/ep_img0.png) [<2>](https://user-images.githubusercontent.com/6503598/131937638-d513ca72-ead7-459b-a8ce-619fb302b7da.png)
 
 ## dxgi.dll - the patcher
-In the [Releases](https://github.com/valinet/ExplorerPatcher/releases) section, you will find a download for a DLL called `dxgi.dll`. It has been tested on the latest stable build of Windows 11 (22000.194), but it may work just fine on newer builds too. This is the runtime part of the application. You need to place this DLL in the following location: `C:\Windows`. This will enable the following functionality:
+In the [Releases](https://github.com/valinet/ExplorerPatcher/releases) section, you will find a download for a DLL called `dxgi.dll`. It has been tested on the latest stable build of Windows 11 (22000.258), but it may work just fine on newer builds too. This is the runtime part of the application. You need to place this DLL in the following location: `C:\Windows`. This will enable the following functionality:
 
 * use the classic taskbar from Windows 10 (without the nasty effects of `UndockingDisabled`)
 * restores the classic power user menu (`Win+X`) when using the classic taskbar
@@ -27,11 +27,6 @@ In the [Releases](https://github.com/valinet/ExplorerPatcher/releases) section, 
 * disable the immersive contex menu system-wide
 * disable the Windows 11 File Explorer command bar
 
-Also, if you place the `StartAllBackX64.dll` file from StartAllback (needs a DLL with SHA-256: `D8D1484D6F7DE94C5018B03A5A93EE8BBB7795BCA5408A721CBB74BE28065689`) in the folder `%appdata%\ExplorerPatcher` (create if it does not exist), the following additional features will be enabled:
-
-* option to apply Mica effect on File Explorer windows
-* option to skin system tray icons to match Windows 11 style
-
 After you have completed the above setup, make sure you have an active Internet connection and restart the Explorer process using Task Manager or by issuing the following command: `taskkill /f /im explorer.exe`. Once File Explorer restarts, some necessary files (symbol files) will be downloaded from Microsoft (around 50MB). This should be relatively quick, depending on your Internet connection speed. When this is done, File Explorer will restart again and will be ready for use. Notifications should show up informing you about the progress, and you can also use Task Manager to watch for network activity. This process only happens when a new Windows 11 build is installed on the machine.
 
 Now, the classic taskbar should be enabled. Still, there is some more setup to do, depending on your preferences.
@@ -40,7 +35,7 @@ Now, the classic taskbar should be enabled. Still, there is some more setup to d
 
 To configure the most common options, the application now comes with a configuration user interface. To open it, right click the Start button (or press `Win`+`X`) and choose "Properties". Alternatively, to open the GUI standalone, run the following command: `rundll32.exe C:\Windows\dxgi.dll,ZZGUI`.
 
-<img src="https://user-images.githubusercontent.com/6503598/135729021-6befba47-84ae-4c65-8133-e380f1d36fe1.png"  width=60% height=60%>
+<img src="https://user-images.githubusercontent.com/6503598/137055901-68856ad5-4a52-4eea-a011-3b907a469938.png"  width=60% height=60%>
 
 The icon near an option signifies its current state:
 
@@ -88,6 +83,7 @@ One of the great features the old taskbar had was the ability to ungroup the tas
 
 #### Ungroup icons on all taskbars
 
+Run this command as administrator:
 ```
 reg.exe add "HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer" /f /v "NoTaskGrouping" /t REG_DWORD /d 1
 ```
@@ -165,22 +161,16 @@ Now that you have set up the basic stuff, you can choose to enable additional se
   reg.exe add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\ExplorerPatcher" /f /v "HideControlCenterButton" /t REG_DWORD /d 1
   ```
 
-* `MicaEffectOnTitlebar` enables Mica effect on File Explorer windows (requires `StartIsBack64.dll`) (default = 0)
-
-  ```
-  reg.exe add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\ExplorerPatcher" /f /v "MicaEffectOnTitlebar" /t REG_DWORD /d 1
-  ```
-
 * `SkinMenus` applies the immersive skin to "Safe to Remove Hardware" and "Bluetooth" pop-up menus (default = 1)
 
   ```
   reg.exe add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\ExplorerPatcher" /f /v "SkinMenus" /t REG_DWORD /d 1
   ```
 
-* `SkinIcons` applies Windows 11 icon skins to taskbar buttons (requires `StartIsBack64.dll`) (default = 1)
+* `ReplaceNetwork` makes right clicking the system tray network icon and choosing "Open Network & Internet settings" open the "Network and Sharing Center" page in Control Panel instead of the network section of the Settings app (default = 0)
 
   ```
-  reg.exe add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\ExplorerPatcher" /f /v "SkinIcons" /t REG_DWORD /d 1
+  reg.exe add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\ExplorerPatcher" /f /v "ReplaceNetwork" /t REG_DWORD /d 1
   ```
 
 * `AllocConsole` will display a console window (for debugging purposes) (default = 0, for advanced users only)
@@ -212,7 +202,9 @@ Also, if you chose to place the patcher in `C:\Windows\SystemApps\Microsoft.Wind
 Even more registry configuration settings are described in the following document, make sure to take a look on it [here](https://github.com/valinet/ExplorerPatcher/issues/9).
 
 ## Uninstallation
-To uninstall, rename the DLL in the locations where you placed it from `dxgi.dll` to `dxgio.dll`. Then, reboot the computer and delete the `dxgio.dll` file from the locations where it is placed. You can also then safely delete the `%appdata%\ExplorerPatcher` directory as well. 
+First, move the taskbar to the bottom, if you have moved it to the top or to the sides. This is so that the Windows 11 taskbar can render correctly.
+
+Then, to uninstall, rename the DLL in the locations where you placed it from `dxgi.dll` to `dxgio.dll`. Then, reboot the computer and delete the `dxgio.dll` file from the locations where it is placed. You can also then safely delete the `%appdata%\ExplorerPatcher` directory as well. 
 
 ## More details
 A changelog is available [here](https://github.com/valinet/ExplorerPatcher/blob/master/CHANGELOG.md).

@@ -19,7 +19,32 @@
 #include <valinet/pdb/pdb.h>
 #define _LIBVALINET_DEBUG_HOOKING_IATPATCH
 #include <valinet/hooking/iatpatch.h>
+
+#define WINX_ADJUST_X 5
+#define WINX_ADJUST_Y 5
+
+#define CHECKFOREGROUNDELAPSED_TIMEOUT 100
+#define POPUPMENU_SAFETOREMOVE_TIMEOUT 300
+#define POPUPMENU_BLUETOOTH_TIMEOUT 700
+#define POPUPMENU_PNIDUI_TIMEOUT 300
+#define POPUPMENU_SNDVOLSSO_TIMEOUT 300
+
+HWND archivehWnd;
+HMODULE hStartIsBack64 = 0;
+BOOL bHideExplorerSearchBar = FALSE;
+BOOL bMicaEffectOnTitlebar = FALSE;
+BOOL bHideControlCenterButton = FALSE;
+BOOL bSkinMenus = TRUE;
+BOOL bSkinIcons = TRUE;
+BOOL bReplaceNetwork = FALSE;
+HMODULE hModule = NULL;
+HANDLE hIsWinXShown = NULL;
+HANDLE hWinXThread = NULL;
+
 #include "utility.h"
+#ifdef USE_PRIVATE_INTERFACES
+#include "ep_private.h"
+#endif
 #include "symbols.h"
 #include "dxgi_imp.h"
 #include "ArchiveMenu.h"
@@ -30,30 +55,6 @@
 #include "GUI.h"
 #include "TaskbarCenter.h"
 
-#define WINX_ADJUST_X 5
-#define WINX_ADJUST_Y 5
-
-#define SB_MICA_EFFECT_SUBCLASS_OFFSET 0x5BFC // 0x5C70
-#define SB_INIT1 0x20054 // 0x26070
-#define SB_INIT2 0x83A4 // Enable dark mode fixes
-#define SB_TRACKPOPUPMENU_HOOK 0x1C774 // 0x21420
-#define SB_TRACKPOPUPMENUEX_HOOK 0x1CB18 // 0x21920
-#define SB_LOADIMAGEW_HOOK 0x3BEB0 // 0x4A6F0
-
-#define CHECKFOREGROUNDELAPSED_TIMEOUT 100
-#define POPUPMENU_SAFETOREMOVE_TIMEOUT 300
-#define POPUPMENU_BLUETOOTH_TIMEOUT 700
-
-HWND archivehWnd;
-HMODULE hStartIsBack64 = 0;
-BOOL bHideExplorerSearchBar = FALSE;
-BOOL bMicaEffectOnTitlebar = FALSE;
-BOOL bHideControlCenterButton = FALSE;
-BOOL bSkinMenus = TRUE;
-BOOL bSkinIcons = TRUE;
-HMODULE hModule = NULL;
-HANDLE hIsWinXShown = NULL;
-HANDLE hWinXThread = NULL;
 
 #pragma region "Generics"
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
@@ -698,6 +699,77 @@ void PopupMenuAdjustCoordinatesAndFlags(int* x, int* y, UINT* uFlags)
         *uFlags |= TPM_VCENTERALIGN | TPM_RIGHTALIGN;
     }
 }
+long long pnidui_TrackPopupMenuElapsed = 0;
+BOOL pnidui_TrackPopupMenuHook(
+    HMENU       hMenu,
+    UINT        uFlags,
+    int         x,
+    int         y,
+    int         nReserved,
+    HWND        hWnd,
+    const RECT* prcRect
+)
+{
+    long long elapsed = milliseconds_now() - pnidui_TrackPopupMenuElapsed;
+    BOOL b = FALSE;
+    if (elapsed > POPUPMENU_PNIDUI_TIMEOUT || !bSkinMenus)
+    {
+        if (bSkinMenus)
+        {
+            PopupMenuAdjustCoordinatesAndFlags(&x, &y, &uFlags);
+        }
+        b = TrackPopupMenu(
+            hMenu,
+            uFlags | TPM_RIGHTBUTTON,
+            x,
+            y,
+            0,
+            hWnd,
+            prcRect
+        );
+        if (bReplaceNetwork && b == 3109)
+        {
+            ShellExecuteW(
+                NULL,
+                L"open",
+                L"shell:::{8E908FC9-BECC-40f6-915B-F4CA0E70D03D}",
+                NULL,
+                NULL,
+                SW_SHOWNORMAL
+            );
+            b = 0;
+        }
+        pnidui_TrackPopupMenuElapsed = milliseconds_now();
+    }
+    return b;
+}
+long long sndvolsso_TrackPopupMenuExElapsed = 0;
+BOOL sndvolsso_TrackPopupMenuExHook(
+    HMENU       hMenu,
+    UINT        uFlags,
+    int         x,
+    int         y,
+    HWND        hWnd,
+    LPTPMPARAMS lptpm
+)
+{
+    long long elapsed = milliseconds_now() - sndvolsso_TrackPopupMenuExElapsed;
+    BOOL b = FALSE;
+    if (elapsed > POPUPMENU_SNDVOLSSO_TIMEOUT)
+    {
+        PopupMenuAdjustCoordinatesAndFlags(&x, &y, &uFlags);
+        b = TrackPopupMenuEx(
+            hMenu,
+            uFlags | TPM_RIGHTBUTTON,
+            x,
+            y,
+            hWnd,
+            lptpm
+        );
+        sndvolsso_TrackPopupMenuExElapsed = milliseconds_now();
+    }
+    return b;
+}
 long long TrackPopupMenuElapsed = 0;
 BOOL TrackPopupMenuHook(
     HMENU       hMenu,
@@ -795,7 +867,7 @@ BOOL TrackPopupMenuExHook(
 #pragma endregion
 
 
-#pragma region "Mica effect for Explorer and remove search bar"
+#pragma region "Hide search bar in Explorer"
 static HWND(*explorerframe_SHCreateWorkerWindowFunc)(
     WNDPROC  	wndProc,
     HWND  	hWndParent,
@@ -824,17 +896,15 @@ HWND WINAPI explorerframe_SHCreateWorkerWindowHook(
     );
     if (dwExStyle == 0x10000 && dwStyle == 1174405120)
     {
-        if (hStartIsBack64 && bMicaEffectOnTitlebar)
+#ifdef USE_PRIVATE_INTERFACES
+        if (bMicaEffectOnTitlebar)
         {
             BOOL value = TRUE;
-            DwmSetWindowAttribute(hWndParent, DWMWA_MICA_EFFFECT, &value, sizeof(BOOL)); // Set Mica effect on title bar
-            SetWindowSubclass(
-                result, 
-                (uintptr_t)hStartIsBack64 + SB_MICA_EFFECT_SUBCLASS_OFFSET, 
-                (uintptr_t)hStartIsBack64 + SB_MICA_EFFECT_SUBCLASS_OFFSET, 
-                0
-            );
+            SetPropW(hWndParent, L"NavBarGlass", HANDLE_FLAG_INHERIT);
+            DwmSetWindowAttribute(hWndParent, DWMWA_MICA_EFFFECT, &value, sizeof(BOOL));
+            SetWindowSubclass(result, ExplorerMicaTitlebarSubclassProc, ExplorerMicaTitlebarSubclassProc, 0);
         }
+#endif
         if (bHideExplorerSearchBar)
         {
             SetWindowSubclass(hWndParent, HideExplorerSearchBarSubClass, HideExplorerSearchBarSubClass, 0);
@@ -1013,7 +1083,11 @@ DEFINE_GUID(_uuidof_v13,
     0x4F7F, 0x5DE5, 0xA5, 0x28,
     0x7e, 0xfe, 0xf4, 0x18, 0xaa, 0x48
 );
-void PositionStartMenuForMonitor(HMONITOR hMonitor, DWORD location)
+BOOL PositionStartMenuForMonitor(
+    HMONITOR hMonitor, 
+    HDC unused1,
+    LPRECT unused2,
+    DWORD location)
 {
     HRESULT hr = S_OK;
     HSTRING_HEADER hstringHeader;
@@ -1091,6 +1165,7 @@ void PositionStartMenuForMonitor(HMONITOR hMonitor, DWORD location)
         WindowsDeleteString(string);
         RoUninitialize();
     }
+    return TRUE;
 }
 
 void PositionStartMenu(INT64 unused, DWORD location)
@@ -1105,7 +1180,7 @@ void PositionStartMenu(INT64 unused, DWORD location)
             L"Shell_SecondaryTrayWnd",
             NULL
         );
-        PositionStartMenuForMonitor(MonitorFromWindow(hWnd, MONITOR_DEFAULTTOPRIMARY), location);
+        PositionStartMenuForMonitor(MonitorFromWindow(hWnd, MONITOR_DEFAULTTOPRIMARY), NULL, NULL, location);
     } while (hWnd);
     if (!hWnd)
     {
@@ -1115,14 +1190,16 @@ void PositionStartMenu(INT64 unused, DWORD location)
             L"Shell_TrayWnd",
             NULL
         );
-        PositionStartMenuForMonitor(MonitorFromWindow(hWnd, MONITOR_DEFAULTTOPRIMARY), location);
+        PositionStartMenuForMonitor(MonitorFromWindow(hWnd, MONITOR_DEFAULTTOPRIMARY), NULL, NULL, location);
     }
 }
 
 DWORD PositionStartMenuTimeout(INT64 timeout)
 {
     Sleep(timeout);
-    PositionStartMenu(0, GetStartMenuPosition());
+    printf("Started \"Position Start menu\" thread.\n");
+    EnumDisplayMonitors(NULL, NULL, PositionStartMenuForMonitor, GetStartMenuPosition());
+    printf("Ended \"Position Start menu\" thread.\n");
 }
 
 DWORD GetStartMenuPosition()
@@ -1331,6 +1408,48 @@ BOOL explorer_SetChildWindowNoActivateHook(HWND hWnd)
 #pragma endregion
 
 
+#pragma region "Hide Show desktop button"
+LRESULT(*ShellTrayWndProcFunc)(
+    HWND hWnd,
+    UINT uMsg,
+    WPARAM wParam,
+    LPARAM lParam
+    );
+LRESULT ShellTrayWndProcHook(
+    HWND hWnd,
+    UINT uMsg,
+    WPARAM wParam,
+    LPARAM lParam
+)
+{
+    switch (uMsg)
+    {
+    case WM_DESTROY:
+    {
+        break;
+    }
+    case WM_ERASEBKGND:
+    {
+        HWND v33 = FindWindowExW(hWnd, 0, L"TrayNotifyWnd", 0);
+        HWND v34 = FindWindowExW(v33, 0, L"TrayShowDesktopButtonWClass", 0);
+        if (v34)
+        {
+            /*BYTE* lpShouldDisplayCCButton = (BYTE*)(GetWindowLongPtrW(v34, 0) + 120);
+            if (*lpShouldDisplayCCButton)
+            {
+                *lpShouldDisplayCCButton = FALSE;
+            }*/
+
+            //ShowWindow(v34, SW_HIDE);
+        }
+        break;
+    }
+    }
+    return ShellTrayWndProcFunc(hWnd, uMsg, wParam, lParam);
+}
+#pragma endregion
+
+
 #pragma region "Notify shell ready (fixes delay at logon)"
 DWORD SignalShellReady(DWORD wait)
 {
@@ -1381,7 +1500,13 @@ DWORD SignalShellReady(DWORD wait)
                         0
                     );
                     */
-                    PositionStartMenu(0, GetStartMenuPosition());
+                    /*printf("hook show desktop\n");
+                    void* ShellTrayWndProcFuncT = GetWindowLongPtrW(hWnd, GWLP_WNDPROC);
+                    if (ShellTrayWndProcHook != ShellTrayWndProcFuncT)
+                    {
+                        ShellTrayWndProcFunc = ShellTrayWndProcFuncT;
+                        SetWindowLongPtrW(hWnd, GWLP_WNDPROC, ShellTrayWndProcHook);
+                    }*/
                     break;
                 }
             }
@@ -1495,6 +1620,7 @@ __declspec(dllexport) DWORD WINAPI main(
         }
 
 
+        dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
             TEXT("HideExplorerSearchBar"),
@@ -1503,6 +1629,7 @@ __declspec(dllexport) DWORD WINAPI main(
             &bHideExplorerSearchBar,
             &dwSize
         );
+        dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
             TEXT("MicaEffectOnTitlebar"),
@@ -1511,6 +1638,7 @@ __declspec(dllexport) DWORD WINAPI main(
             &bMicaEffectOnTitlebar,
             &dwSize
         );
+        dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
             TEXT("HideControlCenterButton"),
@@ -1519,6 +1647,7 @@ __declspec(dllexport) DWORD WINAPI main(
             &bHideControlCenterButton,
             &dwSize
         );
+        dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
             TEXT("SkinMenus"),
@@ -1527,6 +1656,7 @@ __declspec(dllexport) DWORD WINAPI main(
             &bSkinMenus,
             &dwSize
         );
+        dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
             TEXT("SkinIcons"),
@@ -1535,9 +1665,19 @@ __declspec(dllexport) DWORD WINAPI main(
             &bSkinIcons,
             &dwSize
         );
-        
+        dwSize = sizeof(DWORD);
+        RegQueryValueExW(
+            hKey,
+            TEXT("ReplaceNetwork"),
+            0,
+            NULL,
+            &bReplaceNetwork,
+            &dwSize
+        );
 
 
+
+        /*
         TCHAR* wszSBPath = malloc((MAX_PATH + 1) * sizeof(TCHAR));
         if (!wszSBPath)
         {
@@ -1561,10 +1701,10 @@ __declspec(dllexport) DWORD WINAPI main(
         );
         hStartIsBack64 = LoadLibraryW(wszSBPath);
         free(wszSBPath);
+        */
 
 
 
-        
         HANDLE hExplorer = GetModuleHandle(NULL);
         SetChildWindowNoActivateFunc = GetProcAddress(GetModuleHandleW(L"user32.dll"), (LPCSTR)2005);
         if (bHideControlCenterButton)
@@ -1598,19 +1738,19 @@ __declspec(dllexport) DWORD WINAPI main(
 
         CLauncherTipContextMenu_GetMenuItemsAsyncFunc = (INT64(*)(void*, void*, void**))
             ((uintptr_t)hTwinuiPcshell + symbols_PTRS.twinui_pcshell_PTRS[1]);
-        
+
         ImmersiveContextMenuHelper_ApplyOwnerDrawToMenuFunc = (INT64(*)(HMENU, HMENU, HWND, unsigned int, void*))
             ((uintptr_t)hTwinuiPcshell + symbols_PTRS.twinui_pcshell_PTRS[2]);
 
         ImmersiveContextMenuHelper_RemoveOwnerDrawFromMenuFunc = (void(*)(HMENU, HMENU, HWND))
             ((uintptr_t)hTwinuiPcshell + symbols_PTRS.twinui_pcshell_PTRS[3]);
-        
+
         CLauncherTipContextMenu_ExecuteShutdownCommandFunc = (void(*)(void*, void*))
             ((uintptr_t)hTwinuiPcshell + symbols_PTRS.twinui_pcshell_PTRS[4]);
-        
+
         CLauncherTipContextMenu_ExecuteCommandFunc = (void(*)(void*, int))
             ((uintptr_t)hTwinuiPcshell + symbols_PTRS.twinui_pcshell_PTRS[5]);
-        
+
         CLauncherTipContextMenu_ShowLauncherTipContextMenuFunc = (INT64(*)(void*, POINT*))
             ((uintptr_t)hTwinuiPcshell + symbols_PTRS.twinui_pcshell_PTRS[6]);
         rv = funchook_prepare(
@@ -1645,19 +1785,14 @@ __declspec(dllexport) DWORD WINAPI main(
         HANDLE hStobject = LoadLibraryW(L"stobject.dll");
         if (bSkinMenus)
         {
-            if (1) // !hStartIsBack64
-            {
-                VnPatchDelayIAT(hStobject, "user32.dll", "TrackPopupMenu", TrackPopupMenuHook);
-            }
-            else
-            {
-                VnPatchDelayIAT(hStobject, "user32.dll", "TrackPopupMenu", (uintptr_t)hStartIsBack64 + SB_TRACKPOPUPMENU_HOOK);
-            }
+            VnPatchDelayIAT(hStobject, "user32.dll", "TrackPopupMenu", TrackPopupMenuHook);
         }
-        if (bSkinIcons && hStartIsBack64)
+#ifdef USE_PRIVATE_INTERFACES
+        if (bSkinIcons)
         {
-            VnPatchDelayIAT(hStobject, "user32.dll", "LoadImageW", (uintptr_t)hStartIsBack64 + SB_LOADIMAGEW_HOOK);
+            VnPatchDelayIAT(hStobject, "user32.dll", "LoadImageW", SystemTray_LoadImageWHook);
         }
+#endif
         printf("Setup stobject functions done\n");
 
 
@@ -1665,43 +1800,50 @@ __declspec(dllexport) DWORD WINAPI main(
         HANDLE hBthprops = LoadLibraryW(L"bthprops.cpl");
         if (bSkinMenus)
         {
-            if (1) //!hStartIsBack64
-            {
-                VnPatchIAT(hBthprops, "user32.dll", "TrackPopupMenuEx", TrackPopupMenuExHook);
-            }
-            else
-            {
-                VnPatchIAT(hBthprops, "user32.dll", "TrackPopupMenuEx", (uintptr_t)hStartIsBack64 + SB_TRACKPOPUPMENUEX_HOOK);
-            }
+            VnPatchIAT(hBthprops, "user32.dll", "TrackPopupMenuEx", TrackPopupMenuExHook);
         }
-        if (bSkinIcons && hStartIsBack64)
+#ifdef USE_PRIVATE_INTERFACES
+        if (bSkinIcons)
         {
-            VnPatchIAT(hBthprops, "user32.dll", "LoadImageW", (uintptr_t)hStartIsBack64 + SB_LOADIMAGEW_HOOK);
+            VnPatchIAT(hBthprops, "user32.dll", "LoadImageW", SystemTray_LoadImageWHook);
         }
+#endif
         printf("Setup bthprops functions done\n");
 
 
 
         HANDLE hPnidui = LoadLibraryW(L"pnidui.dll");
         VnPatchIAT(hPnidui, "api-ms-win-core-com-l1-1-0.dll", "CoCreateInstance", pnidui_CoCreateInstanceHook);
-        if (bSkinIcons && hStartIsBack64)
+        if (bSkinMenus || bReplaceNetwork)
         {
-            VnPatchIAT(hPnidui, "user32.dll", "LoadImageW", (uintptr_t)hStartIsBack64 + SB_LOADIMAGEW_HOOK);
+            VnPatchIAT(hPnidui, "user32.dll", "TrackPopupMenu", pnidui_TrackPopupMenuHook);
         }
+#ifdef USE_PRIVATE_INTERFACES
+        if (bSkinIcons)
+        {
+            VnPatchIAT(hPnidui, "user32.dll", "LoadImageW", SystemTray_LoadImageWHook);
+        }
+#endif
         printf("Setup pnidui functions done\n");
 
 
 
 
         HANDLE hSndvolsso = LoadLibraryW(L"sndvolsso.dll");
-        if (bSkinIcons && hStartIsBack64)
+        if (bSkinMenus)
         {
-            VnPatchIAT(hSndvolsso, "user32.dll", "LoadImageW", (uintptr_t)hStartIsBack64 + SB_LOADIMAGEW_HOOK);
+            VnPatchIAT(hSndvolsso, "user32.dll", "TrackPopupMenuEx", sndvolsso_TrackPopupMenuExHook);
         }
+#ifdef USE_PRIVATE_INTERFACES
+        if (bSkinIcons)
+        {
+            VnPatchIAT(hSndvolsso, "user32.dll", "LoadImageW", SystemTray_LoadImageWHook);
+        }
+#endif
         printf("Setup sndvolsso functions done\n");
 
 
-        
+
         HANDLE hExplorerFrame = LoadLibraryW(L"ExplorerFrame.dll");
         explorerframe_SHCreateWorkerWindowFunc = GetProcAddress(LoadLibraryW(L"shcore.dll"), (LPCSTR)188);
         VnPatchIAT(hExplorerFrame, "shcore.dll", (LPCSTR)188, explorerframe_SHCreateWorkerWindowHook);
@@ -1718,7 +1860,7 @@ __declspec(dllexport) DWORD WINAPI main(
         printf("Installed hooks.\n");
 
 
-
+        /*
         if (hStartIsBack64)
         {
             ((void(*)())((uintptr_t)hStartIsBack64 + SB_INIT1))();
@@ -1727,18 +1869,18 @@ __declspec(dllexport) DWORD WINAPI main(
 
             printf("Loaded and initialized StartIsBack64 DLL\n");
         }
-
+        */
 
 
         HANDLE hEvent = CreateEventEx(
-            0, 
+            0,
             L"ShellDesktopSwitchEvent",
             CREATE_EVENT_MANUAL_RESET,
             EVENT_ALL_ACCESS
         );
         ResetEvent(hEvent);
         printf("Created ShellDesktopSwitchEvent event.\n");
-        
+
 
 
 
@@ -1841,6 +1983,9 @@ __declspec(dllexport) DWORD WINAPI main(
         {
             RegCloseKey(hKey);
         }
+
+
+        CreateThread(0, 0, PositionStartMenuTimeout, 0, 0, 0);
     }
     else
     {
