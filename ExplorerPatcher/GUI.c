@@ -1,9 +1,9 @@
 #include "GUI.h"
 
+void* GUI_FileMapping = NULL;
+DWORD GUI_FileSize = 0;
 BOOL g_darkModeEnabled = FALSE;
 static void(*RefreshImmersiveColorPolicyState)() = NULL;
-static int(*SetPreferredAppMode)(int bAllowDark) = NULL;
-static BOOL(*AllowDarkModeForWindow)(HWND hWnd, BOOL bAllowDark) = NULL;
 static BOOL(*ShouldAppsUseDarkMode)() = NULL;
 BOOL IsHighContrast()
 {
@@ -19,7 +19,6 @@ BOOL IsColorSchemeChangeMessage(LPARAM lParam)
     BOOL is = FALSE;
     if (lParam && CompareStringOrdinal(lParam, -1, L"ImmersiveColorSet", -1, TRUE) == CSTR_EQUAL)
     {
-        RefreshImmersiveColorPolicyState();
         is = TRUE;
     }
     return is;
@@ -89,31 +88,43 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
     _this->padding.right = GUI_PADDING_RIGHT * dx;
     _this->padding.top = GUI_PADDING_TOP * dy;
     _this->padding.bottom = GUI_PADDING_BOTTOM * dy;
+    _this->sidebarWidth = GUI_SIDEBAR_WIDTH * dx;
 
     RECT rc;
     GetClientRect(hwnd, &rc);
-    HRSRC hRscr = FindResource(
-        hModule,
-        MAKEINTRESOURCE(IDR_REGISTRY1),
-        RT_RCDATA
-    );
-    if (!hRscr)
+
+    PVOID pRscr = NULL;
+    DWORD cbRscr = 0;
+    if (GUI_FileMapping && GUI_FileSize)
     {
-        return FALSE;
+        pRscr = GUI_FileMapping;
+        cbRscr = GUI_FileSize;
     }
-    HGLOBAL hgRscr = LoadResource(
-        hModule,
-        hRscr
-    );
-    if (!hgRscr)
+    else
     {
-        return FALSE;
+        HRSRC hRscr = FindResource(
+            hModule,
+            MAKEINTRESOURCE(IDR_REGISTRY1),
+            RT_RCDATA
+        );
+        if (!hRscr)
+        {
+            return FALSE;
+        }
+        HGLOBAL hgRscr = LoadResource(
+            hModule,
+            hRscr
+        );
+        if (!hgRscr)
+        {
+            return FALSE;
+        }
+        pRscr = LockResource(hgRscr);
+        cbRscr = SizeofResource(
+            hModule,
+            hRscr
+        );
     }
-    PVOID pRscr = LockResource(hgRscr);
-    DWORD cbRscr = SizeofResource(
-        hModule,
-        hRscr
-    );
 
     LOGFONT logFont;
     memset(&logFont, 0, sizeof(logFont));
@@ -129,7 +140,8 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
     logFont.lfHeight = GUI_CAPTION_FONT_SIZE * dy;
     logFont.lfWeight = FW_BOLD;
     HFONT hFontCaption = CreateFontIndirect(&logFont);
-    logFont.lfHeight = GUI_TITLE_FONT_SIZE * dy;
+    logFont = ncm.lfMenuFont;
+    if (IsThemeActive()) logFont.lfHeight = GUI_TITLE_FONT_SIZE * dy;
     HFONT hFontTitle = CreateFontIndirect(&logFont);
     logFont.lfWeight = FW_REGULAR;
     logFont.lfUnderline = 1;
@@ -137,6 +149,11 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
     logFont.lfWeight = FW_REGULAR;
     logFont.lfUnderline = 0;
     HFONT hFontRegular = CreateFontIndirect(&logFont);
+    logFont.lfWeight = FW_DEMIBOLD;
+    if (IsThemeActive()) logFont.lfHeight = GUI_SECTION_FONT_SIZE * dy;
+    HFONT hFontSection = CreateFontIndirect(&logFont);
+    logFont.lfUnderline = 1;
+    HFONT hFontSectionSel = CreateFontIndirect(&logFont);
     HFONT hOldFont = NULL;
 
     DTTOPTS DttOpts;
@@ -148,6 +165,8 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
     RECT rcText;
     DWORD dwMaxHeight = 0, dwMaxWidth = 0;
     BOOL bTabOrderHit = FALSE;
+    DWORD dwLeftPad = _this->padding.left + _this->sidebarWidth + _this->padding.right;
+    DWORD dwInitialLeftPad = dwLeftPad;
 
     HDC hdcPaint = NULL;
     BP_PAINTPARAMS params = { sizeof(BP_PAINTPARAMS) };
@@ -156,23 +175,29 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
 
     if (!hDC || (hDC && hdcPaint))
     {
-        if (!IsThemeActive())
+        if (!hDC)
         {
-            COLORREF oldcr = SetBkColor(hdcPaint, GetSysColor(COLOR_WINDOW));
+            hdcPaint = GetDC(hwnd);
+        }
+
+        if (!IsThemeActive() && hDC)
+        {
+            COLORREF oldcr = SetBkColor(hdcPaint, GetSysColor(COLOR_MENU));
             ExtTextOutW(hdcPaint, 0, 0, ETO_OPAQUE, &rc, L"", 0, 0);
             SetBkColor(hdcPaint, oldcr);
             SetTextColor(hdcPaint, GetSysColor(COLOR_WINDOWTEXT));
+            SetBkMode(hdcPaint, TRANSPARENT);
         }
 
         FILE* f = fmemopen(pRscr, cbRscr, "r");
         char* line = malloc(MAX_LINE_LENGTH * sizeof(char));
-        wchar_t* text = malloc(MAX_LINE_LENGTH * sizeof(wchar_t)); 
+        wchar_t* text = malloc((MAX_LINE_LENGTH + 3) * sizeof(wchar_t)); 
         wchar_t* name = malloc(MAX_LINE_LENGTH * sizeof(wchar_t));
         wchar_t* section = malloc(MAX_LINE_LENGTH * sizeof(wchar_t));
-        size_t bufsiz = 0, numChRd = 0, tabOrder = 1;
+        size_t bufsiz = MAX_LINE_LENGTH, numChRd = 0, tabOrder = 1, currentSection = -1, topAdj = 0;
         while ((numChRd = getline(&line, &bufsiz, f)) != -1)
         {
-            if (strcmp(line, "Windows Registry Editor Version 5.00\r\n") && strcmp(line, "\r\n"))
+            if (strcmp(line, "Windows Registry Editor Version 5.00\r\n") && strcmp(line, "\r\n") && (currentSection == -1 || currentSection == _this->section || !strncmp(line, ";T ", 3) || !strncmp(line, ";f", 2)))
             {
 #ifndef USE_PRIVATE_INTERFACES
                 if (!strncmp(line, ";p ", 3))
@@ -184,6 +209,25 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                     }
                 }
 #endif
+                if (!strncmp(line, ";f", 2))
+                {
+                    //if (topAdj + ((currentSection + 2) * GUI_SECTION_HEIGHT * dy) > dwMaxHeight)
+                    //{
+                    //    dwMaxHeight = topAdj + ((currentSection + 2) * GUI_SECTION_HEIGHT * dy);
+                    //}
+                    if (_this->dwStatusbarY == 0)
+                    {
+                        dwMaxHeight += GUI_STATUS_PADDING * dy;
+                        _this->dwStatusbarY = dwMaxHeight / dy;
+                    }
+                    else
+                    {
+                        dwMaxHeight = _this->dwStatusbarY * dy;
+                    }
+                    currentSection = -1;
+                    dwLeftPad = 0;
+                    continue;
+                }
 
                 if (!strncmp(line, "[", 1))
                 {
@@ -200,32 +244,34 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                 }
 
                 DWORD dwLineHeight = GUI_LINE_HEIGHT;
+                DWORD dwBottom = _this->padding.bottom;
+                DWORD dwTop = _this->padding.top;
+                if (!strncmp(line, ";a ", 3) || !strncmp(line, ";e ", 3))
+                {
+                    dwBottom = 0;
+                    dwLineHeight -= 0.2 * dwLineHeight;
+                }
 
-                rcText.left = _this->padding.left;
-                rcText.top = _this->padding.top + dwMaxHeight;
+                rcText.left = dwLeftPad + _this->padding.left;
+                rcText.top = dwTop + dwMaxHeight;
                 rcText.right = (rc.right - rc.left) - _this->padding.right;
-                rcText.bottom = dwMaxHeight + dwLineHeight * dy - _this->padding.bottom;
+                rcText.bottom = dwMaxHeight + dwLineHeight * dy - dwBottom;
 
                 if (!strncmp(line, ";T ", 3))
                 {
-                    hOldFont = SelectObject(hDC ? hdcPaint : GetDC(hwnd), hFontTitle);
-                }
-                else if (!strncmp(line, ";M ", 3))
-                {
-                    hOldFont = SelectObject(hDC ? hdcPaint : GetDC(hwnd), hFontCaption);
-                }
-                else if (!strncmp(line, ";u ", 3))
-                {
-                    hOldFont = SelectObject(hDC ? hdcPaint : GetDC(hwnd), hFontUnderline);
-                }
-                else
-                {
-                    hOldFont = SelectObject(hDC ? hdcPaint : GetDC(hwnd), hFontRegular);
-                }
-
-                if (!strncmp(line, ";T ", 3) || !strncmp(line, ";t ", 3) || !strncmp(line, ";u ", 3) || !strncmp(line, ";M ", 3))
-                {
-                    ZeroMemory(text, MAX_LINE_LENGTH * sizeof(wchar_t));
+                    if (currentSection + 1 == _this->section)
+                    {
+                        hOldFont = SelectObject(hdcPaint, hFontSectionSel);
+                    }
+                    else
+                    {
+                        hOldFont = SelectObject(hdcPaint, hFontSection);
+                    }
+                    rcText.left = _this->padding.left;
+                    rcText.right = _this->padding.left + _this->sidebarWidth;
+                    rcText.top = topAdj + ((currentSection + 1) * GUI_SECTION_HEIGHT * dy);
+                    rcText.bottom = topAdj + ((currentSection + 2) * GUI_SECTION_HEIGHT * dy);
+                    ZeroMemory(text, (MAX_LINE_LENGTH + 3) * sizeof(wchar_t));
                     MultiByteToWideChar(
                         CP_UTF8,
                         MB_PRECOMPOSED,
@@ -234,6 +280,109 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         text,
                         MAX_LINE_LENGTH
                     );
+                    if (hDC)
+                    {
+                        if (IsThemeActive())
+                        {
+                            DrawThemeTextEx(
+                                _this->hTheme,
+                                hdcPaint,
+                                0,
+                                0,
+                                text,
+                                -1,
+                                dwTextFlags,
+                                &rcText,
+                                &DttOpts
+                            );
+                        }
+                        else
+                        {
+                            DrawTextW(
+                                hdcPaint,
+                                text,
+                                -1,
+                                &rcText,
+                                dwTextFlags
+                            );
+                        }
+                    }
+                    else
+                    {
+                        RECT rcTemp;
+                        rcTemp = rcText;
+                        DrawTextW(
+                            hdcPaint,
+                            text,
+                            -1,
+                            &rcTemp,
+                            DT_CALCRECT
+                        );
+                        rcTemp.bottom = rcText.bottom;
+                        if (PtInRect(&rcTemp, pt))
+                        {
+                            _this->section = currentSection + 1;
+                            InvalidateRect(hwnd, NULL, FALSE);
+                        }
+                    }
+                    currentSection++;
+                    continue;
+                }
+                else if (!strncmp(line, ";M ", 3))
+                {
+                    rcText.left = _this->padding.left;
+                    topAdj = dwMaxHeight + GUI_CAPTION_LINE_HEIGHT * dy;
+                    hOldFont = SelectObject(hdcPaint, hFontCaption);
+                }
+                else if (!strncmp(line, ";u ", 3))
+                {
+                    hOldFont = SelectObject(hdcPaint, hFontUnderline);
+                }
+                else
+                {
+                    hOldFont = SelectObject(hdcPaint, hFontRegular);
+                }
+
+                if (!strncmp(line, ";e ", 3) || !strncmp(line, ";a ", 3) || !strncmp(line, ";T ", 3) || !strncmp(line, ";t ", 3) || !strncmp(line, ";u ", 3) || !strncmp(line, ";M ", 3))
+                {
+                    if (!strncmp(line, ";t ", 3) || !strncmp(line, ";e ", 3) || !strncmp(line, ";a ", 3))
+                    {
+                        char* p = strstr(line, "%VERSIONINFO%");
+                        if (p)
+                        {
+                            DWORD dwLeftMost = 0;
+                            DWORD dwSecondLeft = 0;
+                            DWORD dwSecondRight = 0;
+                            DWORD dwRightMost = 0;
+
+                            QueryVersionInfo(hModule, VS_VERSION_INFO, &dwLeftMost, &dwSecondLeft, &dwSecondRight, &dwRightMost);
+
+                            sprintf_s(p, MAX_PATH, "%d.%d.%d.%d", dwLeftMost, dwSecondLeft, dwSecondRight, dwRightMost);
+                        }
+                    }
+                    ZeroMemory(text, (MAX_LINE_LENGTH + 3) * sizeof(wchar_t));
+                    MultiByteToWideChar(
+                        CP_UTF8,
+                        MB_PRECOMPOSED,
+                        line + 3,
+                        numChRd - 3,
+                        text,
+                        MAX_LINE_LENGTH
+                    );
+                    if (!strncmp(line, ";a ", 3))
+                    {
+                        RECT rcTemp;
+                        rcTemp = rcText;
+                        DrawTextW(
+                            hdcPaint,
+                            L"\u2795  ",
+                            3,
+                            &rcTemp,
+                            DT_CALCRECT
+                        );
+                        rcText.left += rcTemp.right - rcTemp.left;
+                        rcText.right += rcTemp.right - rcTemp.left;
+                    }
                     if (!strncmp(line, ";M ", 3))
                     {
                         TCHAR exeName[MAX_PATH + 1];
@@ -247,13 +396,15 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                             MAX_PATH
                         );
                         PathStripPath(exeName);
-                        if (wcscmp(exeName, L"explorer.exe"))
-                        {
-                            LoadStringW(hModule, IDS_PRODUCTNAME, text, MAX_LINE_LENGTH);
-                        }
-                        else
-                        {
-                            LoadStringW(GetModuleHandleW(L"ExplorerFrame.dll"), 50222, text, 260);
+                        //if (wcscmp(exeName, L"explorer.exe"))
+                        //{
+                        //    LoadStringW(hModule, IDS_PRODUCTNAME, text, MAX_LINE_LENGTH);
+                        //}
+                        //else
+                        //{
+                            HMODULE hExplorerFrame = LoadLibraryExW(L"ExplorerFrame.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
+                            LoadStringW(hExplorerFrame, 50222, text, 260);
+                            FreeLibrary(hExplorerFrame);
                             wchar_t* p = wcschr(text, L'(');
                             if (p)
                             {
@@ -268,7 +419,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                     *p = 0;
                                 }
                             }
-                        }
+                        //}
                         rcText.bottom += GUI_CAPTION_LINE_HEIGHT - dwLineHeight;
                         dwLineHeight = GUI_CAPTION_LINE_HEIGHT;
                         _this->extent.cyTopHeight = rcText.bottom;
@@ -281,7 +432,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                             bTabOrderHit = TRUE;
                             if (!IsThemeActive())
                             {
-                                cr = SetTextColor(hdcPaint, GetSysColor(COLOR_HIGHLIGHT));
+                                cr = SetTextColor(hdcPaint, GetSysColor(COLOR_HIGHLIGHTTEXT));
                             }
                             else
                             {
@@ -299,7 +450,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         );
                         if (rcNew.right - rcNew.left > dwMaxWidth)
                         {
-                            dwMaxWidth = rcNew.right - rcNew.left + 20 * dx;
+                            dwMaxWidth = rcNew.right - rcNew.left + 50 * dx;
                         }
                         if (IsThemeActive())
                         {
@@ -343,7 +494,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         RECT rcTemp;
                         rcTemp = rcText;
                         DrawTextW(
-                            GetDC(hwnd),
+                            hdcPaint,
                             text,
                             -1,
                             &rcTemp,
@@ -535,7 +686,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                 }
                 else if (!strncmp(line, ";l ", 3) || !strncmp(line, ";c ", 3) || !strncmp(line, ";b ", 3) || !strncmp(line, ";i ", 3) || !strncmp(line, ";d ", 3) || !strncmp(line, ";v ", 3))
                 {
-                    ZeroMemory(text, MAX_LINE_LENGTH * sizeof(wchar_t));
+                    ZeroMemory(text, (MAX_LINE_LENGTH + 3) * sizeof(wchar_t));
                     text[0] = L'\u2795';
                     text[1] = L' ';
                     text[2] = L' ';
@@ -547,6 +698,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         text + 3,
                         MAX_LINE_LENGTH
                     );
+
                     wchar_t* x = wcschr(text, L'\n');
                     if (x) *x = 0;
                     x = wcschr(text, L'\r');
@@ -624,7 +776,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         {
                             wchar_t* x = wcschr(d + 1, L':');
                             x++;
-                            value = _wtoi(x);
+                            value = wcstol(x, NULL, 16);
                         }
 
                         if (!bJustCheck)
@@ -707,28 +859,41 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 MAX_LINE_LENGTH,
                                 L" : "
                             );
-                            MENUITEMINFOA menuInfo;
-                            ZeroMemory(&menuInfo, sizeof(MENUITEMINFOA));
-                            menuInfo.cbSize = sizeof(MENUITEMINFOA);
+                            MENUITEMINFOW menuInfo;
+                            ZeroMemory(&menuInfo, sizeof(MENUITEMINFOW));
+                            menuInfo.cbSize = sizeof(MENUITEMINFOW);
                             menuInfo.fMask = MIIM_STRING;
-                            GetMenuItemInfoA(hMenu, value + 1, FALSE, &menuInfo);
-                            char* buf = malloc(sizeof(char) * (menuInfo.cch + 1));
-                            menuInfo.dwTypeData = buf;
+                            GetMenuItemInfoW(hMenu, value + 1, FALSE, &menuInfo);
                             menuInfo.cch += 1;
-                            GetMenuItemInfoA(hMenu, value + 1, FALSE, &menuInfo);
-                            MultiByteToWideChar(
-                                CP_UTF8,
-                                MB_PRECOMPOSED,
-                                buf,
-                                menuInfo.cch,
-                                text + wcslen(text),
-                                MAX_LINE_LENGTH
+                            menuInfo.dwTypeData = text + wcslen(text);
+                            GetMenuItemInfoW(hMenu, value + 1, FALSE, &menuInfo);
+                            ZeroMemory(&menuInfo, sizeof(MENUITEMINFOW));
+                            menuInfo.cbSize = sizeof(MENUITEMINFOW);
+                            menuInfo.fMask = MIIM_STATE;
+                            menuInfo.fState = MFS_CHECKED;
+                            SetMenuItemInfo(hMenu, value + 1, FALSE, &menuInfo);
+                        }
+                        if (hDC && !bInvert && !bBool && !bJustCheck)
+                        {
+                            RECT rcTemp;
+                            rcTemp = rcText;
+                            DrawTextW(
+                                hdcPaint,
+                                text,
+                                3,
+                                &rcTemp,
+                                DT_CALCRECT
                             );
+                            rcText.left += rcTemp.right - rcTemp.left;
+                            for (unsigned int i = 0; i < wcslen(text); ++i)
+                            {
+                                text[i] = text[i + 3];
+                            }
                         }
                         RECT rcTemp;
                         rcTemp = rcText;
                         DrawTextW(
-                            GetDC(hwnd),
+                            hdcPaint,
                             text,
                             -1,
                             &rcTemp,
@@ -786,8 +951,17 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                             {
                                 if (bChoice)
                                 {
+                                    RECT rcTemp;
+                                    rcTemp = rcText;
+                                    DrawTextW(
+                                        hdcPaint,
+                                        text,
+                                        3,
+                                        &rcTemp,
+                                        DT_CALCRECT
+                                    );
                                     POINT p;
-                                    p.x = rcText.left;
+                                    p.x = rcText.left + rcTemp.right - rcTemp.left;
                                     p.y = rcText.bottom;
                                     ClientToScreen(
                                         hwnd,
@@ -849,7 +1023,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         RECT rcTemp;
                         rcTemp = rcText;
                         DrawTextW(
-                            GetDC(hwnd),
+                            hdcPaint,
                             text,
                             -1,
                             &rcTemp,
@@ -864,14 +1038,17 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                             if (p) *p = 0;
                             p = strchr(line, '\n');
                             if (p) *p = 0;
-                            ShellExecuteA(
-                                NULL,
-                                "open",
-                                line + 1,
-                                NULL,
-                                NULL,
-                                SW_SHOWNORMAL
-                            );
+                            if (line[1] != 0)
+                            {
+                                ShellExecuteA(
+                                    NULL,
+                                    "open",
+                                    line + 1,
+                                    NULL,
+                                    NULL,
+                                    SW_SHOWNORMAL
+                                );
+                            }
                         }
                     }
                     if (hDC)
@@ -900,7 +1077,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         );
                         if (rcNew.right - rcNew.left > dwMaxWidth)
                         {
-                            dwMaxWidth = rcNew.right - rcNew.left + 20 * dx;
+                            dwMaxWidth = rcNew.right - rcNew.left + 50 * dx;
                         }
                         if (IsThemeActive())
                         {
@@ -945,14 +1122,24 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
             }
         }
         fclose(f);
+        free(section);
+        free(name);
+        free(text);
+        free(line);
 
+        SelectObject(hdcPaint, hOldFont);
+        if (!hDC)
+        {
+            ReleaseDC(hwnd, hdcPaint);
+        }
+        DeleteObject(hFontSectionSel);
+        DeleteObject(hFontSection);
+        DeleteObject(hFontRegular);
+        DeleteObject(hFontTitle);
+        DeleteObject(hFontUnderline);
+        DeleteObject(hFontCaption);
         if (hDC)
         {
-            SelectObject(hdcPaint, hOldFont);
-            DeleteObject(hFontRegular);
-            DeleteObject(hFontTitle);
-            DeleteObject(hFontUnderline);
-            DeleteObject(hFontCaption);
             if (_this->tabOrder == GUI_MAX_TABORDER)
             {
                 _this->tabOrder = tabOrder;
@@ -969,7 +1156,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
         GetWindowRect(hwnd, &rcWin);
         printf("%d %d - %d %d\n", rcWin.right - rcWin.left, rcWin.bottom - rcWin.top, dwMaxWidth, dwMaxHeight);
 
-        dwMaxWidth += _this->padding.left + _this->padding.right;
+        dwMaxWidth += dwInitialLeftPad + _this->padding.left + _this->padding.right;
         dwMaxHeight += GUI_LINE_HEIGHT * dy + 20 * dy;
 
         HMONITOR hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
@@ -1057,12 +1244,17 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         PostQuitMessage(0);
         return 0;
     }
+    else if (uMsg == WM_GETICON)
+    {
+        return _this->hIcon;
+    }
     else if (uMsg == WM_SETTINGCHANGE)
     {
         if (IsColorSchemeChangeMessage(lParam))
         {
             if (IsThemeActive() && ShouldAppsUseDarkMode)
             {
+                RefreshImmersiveColorPolicyState();
                 BOOL bIsCompositionEnabled = TRUE;
                 DwmIsCompositionEnabled(&bIsCompositionEnabled);
                 BOOL bDarkModeEnabled = IsThemeActive() && bIsCompositionEnabled && ShouldAppsUseDarkMode() && !IsHighContrast();
@@ -1111,6 +1303,14 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             pt.x = 0;
             pt.y = 0;
             GUI_Build(0, hWnd, pt);
+            return 0;
+        }
+        // this should be determined from the file, but for now it works
+        else if (wParam >= 0x30 + 1 && wParam <= 0x30 + 7) 
+        {
+            _this->tabOrder = 0;
+            _this->section = wParam - 0x30 - 1;
+            InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
     }
@@ -1225,6 +1425,41 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
         RegCloseKey(hKey);
     }
 
+    wchar_t wszPath[MAX_PATH];
+    ZeroMemory(
+        wszPath,
+        (MAX_PATH) * sizeof(char)
+    );
+    GetModuleFileNameW(hModule, wszPath, MAX_PATH);
+    PathRemoveFileSpecW(wszPath);
+    wcscat_s(
+        wszPath,
+        MAX_PATH,
+        L"\\settings.reg"
+    );
+    wprintf(L"%s\n", wszPath);
+    if (FileExistsW(wszPath))
+    {
+        HANDLE hFile = CreateFileW(
+            wszPath,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ,
+            NULL,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            0
+        );
+        if (hFile)
+        {
+            HANDLE hFileMapping = CreateFileMappingW(hFile, NULL, PAGE_READWRITE, 0, 0, NULL);
+            if (hFileMapping)
+            {
+                GUI_FileMapping = MapViewOfFile(hFileMapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+                GUI_FileSize = GetFileSize(hFile, NULL);
+            }
+        }
+    }
+
     printf("Started \"GUI\" thread.\n");
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1239,9 +1474,27 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
     _this.padding.right = GUI_PADDING_RIGHT;
     _this.padding.top = GUI_PADDING_TOP;
     _this.padding.bottom = GUI_PADDING_BOTTOM;
+    _this.sidebarWidth = GUI_SIDEBAR_WIDTH;
     _this.hTheme = OpenThemeData(NULL, TEXT(GUI_WINDOWSWITCHER_THEME_CLASS));
     _this.tabOrder = 0;
     _this.bCalcExtent = TRUE;
+    _this.section = 0;
+    _this.dwStatusbarY = 0;
+    _this.hIcon = NULL;
+
+    ZeroMemory(
+        wszPath,
+        (MAX_PATH) * sizeof(wchar_t)
+    );
+    GetSystemDirectoryW(
+        wszPath,
+        MAX_PATH
+    );
+    wcscat_s(
+        wszPath,
+        MAX_PATH,
+        L"\\shell32.dll"
+    );
 
     WNDCLASS wc = { 0 };
     ZeroMemory(&wc, sizeof(WNDCLASSW));
@@ -1251,10 +1504,32 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
     wc.hInstance = hModule;
     wc.lpszClassName = L"ExplorerPatcherGUI";
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    HMODULE hShell32 = LoadLibraryExW(wszPath, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (hShell32)
+    {
+        _this.hIcon = LoadIconW(hShell32, MAKEINTRESOURCEW(40));
+        wc.hIcon = _this.hIcon;
+    }
     RegisterClassW(&wc);
 
     TCHAR title[260];
-    LoadStringW(GetModuleHandleW(L"ExplorerFrame.dll"), 726, title, 260);
+    HMODULE hExplorerFrame = LoadLibraryExW(L"ExplorerFrame.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
+    LoadStringW(hExplorerFrame, 50222, title, 260); // 726 = File Explorer
+    FreeLibrary(hExplorerFrame);
+    wchar_t* p = wcschr(title, L'(');
+    if (p)
+    {
+        p--;
+        if (p == L' ')
+        {
+            *p = 0;
+        }
+        else
+        {
+            p++;
+            *p = 0;
+        }
+    }
     if (title[0] == 0)
     {
         LoadStringW(hModule, IDS_PRODUCTNAME, title, 260);
@@ -1326,10 +1601,27 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
         DispatchMessage(&msg);
     }
 
-    if (bHasLoadedUxtheme)
+    if (hShell32)
+    {
+        CloseHandle(_this.hIcon);
+        FreeLibrary(hShell32);
+    }
+
+    if (bHasLoadedUxtheme && hUxtheme)
     {
         FreeLibrary(hUxtheme);
     }
+
+    _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDOUT);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDOUT);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDOUT);
+    _CrtDumpMemoryLeaks();
+#ifdef _DEBUG
+    _getch();
+#endif
 
     printf("Ended \"GUI\" thread.\n");
 }

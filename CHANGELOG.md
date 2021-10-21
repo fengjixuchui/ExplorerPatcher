@@ -2,12 +2,78 @@
 
 This document includes the same release notes as in the [Releases](https://github.com/valinet/ExplorerPatcher/releases) section on GitHub.
 
-## 22000.258.0.26
+## 22000.258.31.0
 
 Tested on build: 22000.258.
 
+#### New features
+
+* Cortana button now opens the Widgets panel
+* Ability to choose what happens when clicking the Network icon in the system tray
+* Possibility to use the legacy clock flyout
+* Possibility to use the legacy volume flyout
+* Fixes to fully support the classic theme, with a functional taskbar, system tray, Explorer windows, working context menus; read more about this feature [here](https://github.com/valinet/ExplorerPatcher/discussions/101)
+
+#### Feature enhancements
+
+* Reorganized settings in the GUI
+* Added option not to have an accelerator for the `Properties` menu entry in `Win`+`X` (#162)
+
+#### Fixes
+
+* Fixed an issue where the Windows 10 window switcher failed to display some windows (#161)
+* Fixed an issue that prevented Start from opening again until Explorer was restarted after opening File Explorer via the Start menu Explorer icon (#145)
+* Fixed patching in libvalinet
+* Fixed GUI launch path; GUI now launches in an external process, survives Explorer restarts
+
+#### Experimental
+
+The application can now be registered as a shell extension. This will enable the Explorer related functionality to work in Open/Save file dialogs as well. This is especially useful for users wanting proper support of the classic theme in Windows 11.
+
+Please note that this is experimental. For the moment, the preferred installation method remains dropping the DLL in `C:\Windows`. For interested users, I invite you to test this functionality and report your findings in the discussions board.
+
+To enable this, put the 2 DLLs (`ExplorerPatcher.amd64.dll` and `ExplorerPatcher.IA-32.dll`) in a secure folder (for example, `C:\Program Files\ExplorerPatcher`). Then, in that folder, run this command: `regsvr32 ExplorerPatcher.amd64.dll`. After elevation, a message will display informing you of the operation outcome, and if it went well, Explorer will restart displaying the old taskbar.
+
+To uninstall, run `regsvr32 /u ExplorerPatcher.amd64.dll` in the same folder and preferably reboot the computer to unload the DLLs from all applications. Then, the files can be deleted just fine.
+
+## 22000.258.30.6
+
+Tested on build: 22000.258.
+
+* Reworked settings framework
+  * More settings are available to customize
+  * Most setting changes take effect immediatly
+* Implemented Windows 10 window switcher (Alt+Tab)
+* GUI
+  * Revamped GUI, now the interface is split by categories and is displayed on two columns
+  * Regular items do not display a "+" sign anymore at the beginning of their label
+  * The current choice is ticked in the drop down menu
+  * Regions are now calculated correctly
+  * Solved memory leaks
+* Option to disable immersive context menus (#96)
+* General bug fixes
+* Window switcher is now disabled by default (.1)
+* Corrected typo in settings (.2)
+* Added option to set tray clock to display seconds (.3)
+* Added option to set the right click menu of the network system tray icon to launch either (.3):
+  * Network settings in the Settings app
+  * Network and Sharing Center in the Control Panel
+  * Network Connections in the Control Panel
+* Added preliminary support for advanced mitigations for correct rendering when using the classic theme (.3)
+* GUI optionally loads UI file from DLL folder (helps for easy debugging) (.4)
+* Small bug fix for symbols download (.5)
+* Better method for closing windows in window switcher (.6)
+
+## 22000.258.26.3
+
+Tested on build: 22000.258.
+
+* Compatibility with OS build 22000.258
 * Option to open Network and Sharing Center instead if Network settings when right clicking the network icon in the system tray
 * Centered network and sound right click menus and made them toggle on right click
+* Reliability enhancements for Start menu positioning (#78) (.1)
+* Fixes #85 (.2)
+* Fixes #90 (added option to change taskbar icon size) (.3)
 
 ## 22000.194.0.25
 

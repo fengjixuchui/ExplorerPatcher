@@ -99,6 +99,18 @@ const IActivationFactoryAA XamlExtensionsFactory = {
 };
 #pragma endregion
 
+int FileExistsW(wchar_t* file)
+{
+    WIN32_FIND_DATAW FindFileData;
+    HANDLE handle = FindFirstFileW(file, &FindFileData);
+    int found = handle != INVALID_HANDLE_VALUE;
+    if (found)
+    {
+        FindClose(handle);
+    }
+    return found;
+}
+
 void printf_guid(GUID guid) 
 {
     printf("Guid = {%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}\n",
@@ -284,7 +296,7 @@ POINT GetDefaultWinXPosition(BOOL bUseRcWork, BOOL* lpBottom, BOOL* lpRight, BOO
     {
         RECT rc;
         GetWindowRect(hWnd, &rc);
-        if (rc.left - mi.rcMonitor.left == 0)
+        if (rc.left - mi.rcMonitor.left <= 0)
         {
             if (bUseRcWork)
             {
@@ -298,7 +310,7 @@ POINT GetDefaultWinXPosition(BOOL bUseRcWork, BOOL* lpBottom, BOOL* lpRight, BOO
             {
                 point.x++;
             }
-            if (rc.top - mi.rcMonitor.top == 0)
+            if (rc.top - mi.rcMonitor.top <= 0)
             {
                 if (bUseRcWork)
                 {
@@ -345,7 +357,7 @@ POINT GetDefaultWinXPosition(BOOL bUseRcWork, BOOL* lpBottom, BOOL* lpRight, BOO
             {
                 point.x--;
             }
-            if (rc.top - mi.rcMonitor.top == 0)
+            if (rc.top - mi.rcMonitor.top <= 0)
             {
                 if (bUseRcWork)
                 {
@@ -409,4 +421,31 @@ void QueryVersionInfo(HMODULE hModule, WORD Resource, DWORD* dwLeftMost, DWORD* 
     *dwRightMost = LOWORD(dwFileVersionLS);
 
     LocalFree(pResCopy);
+}
+
+void* ReadFromFile(wchar_t* wszFileName, DWORD* dwSize)
+{
+    void* ok = NULL;
+    HANDLE hImage = CreateFileW(wszFileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hImage)
+    {
+        DWORD dwFileSize;
+        GetFileSizeEx(hImage, &dwFileSize);
+        if (dwFileSize)
+        {
+            void* pImage = malloc(dwFileSize);
+            if (pImage)
+            {
+                DWORD dwNumberOfBytesRead = 0;
+                ReadFile(hImage, pImage, dwFileSize, &dwNumberOfBytesRead, NULL);
+                if (dwFileSize == dwNumberOfBytesRead)
+                {
+                    ok = pImage;
+                    *dwSize = dwNumberOfBytesRead;
+                }
+            }
+        }
+        CloseHandle(hImage);
+    }
+    return ok;
 }
