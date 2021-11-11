@@ -1,5 +1,6 @@
 #include "GUI.h"
 
+LANGID locale;
 void* GUI_FileMapping = NULL;
 DWORD GUI_FileSize = 0;
 BOOL g_darkModeEnabled = FALSE;
@@ -510,30 +511,14 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                             if (p) *p = 0;
                             if (!strncmp(line + 1, "restart", 7))
                             {
-                                PROCESSENTRY32 pe32 = { 0 };
-                                pe32.dwSize = sizeof(PROCESSENTRY32);
-                                HANDLE hSnapshot = CreateToolhelp32Snapshot(
-                                    TH32CS_SNAPPROCESS,
-                                    0
-                                );
-                                if (Process32First(hSnapshot, &pe32) == TRUE)
+                                if (FindWindowW(L"Shell_TrayWnd", NULL))
                                 {
-                                    do
-                                    {
-                                        if (!wcscmp(pe32.szExeFile, TEXT("sihost.exe")))
-                                        {
-                                            HANDLE hSihost = OpenProcess(
-                                                PROCESS_TERMINATE,
-                                                FALSE,
-                                                pe32.th32ProcessID
-                                            );
-                                            TerminateProcess(hSihost, 0);
-                                            CloseHandle(hSihost);
-                                            return TRUE;
-                                        }
-                                    } while (Process32Next(hSnapshot, &pe32) == TRUE);
+                                    ZZRestartExplorer();
                                 }
-                                CloseHandle(hSnapshot);
+                                else
+                                {
+                                    StartExplorer();
+                                }
                             }
                             else if (!strncmp(line + 1, "reset", 5))
                             {
@@ -735,21 +720,33 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 p = strchr(p + 1, '\n');
                                 if (p) *p = 0;
 
-                                MENUITEMINFOA menuInfo;
-                                ZeroMemory(&menuInfo, sizeof(MENUITEMINFOA));
-                                menuInfo.cbSize = sizeof(MENUITEMINFOA);
+                                wchar_t* miText = malloc((strlen(ln) + 1) * sizeof(wchar_t));
+                                MultiByteToWideChar(
+                                    CP_UTF8,
+                                    MB_PRECOMPOSED,
+                                    ln,
+                                    strlen(ln) + 1,
+                                    miText,
+                                    strlen(ln) + 1
+                                );
+
+                                MENUITEMINFOW menuInfo;
+                                ZeroMemory(&menuInfo, sizeof(MENUITEMINFOW));
+                                menuInfo.cbSize = sizeof(MENUITEMINFOW);
                                 menuInfo.fMask = MIIM_ID | MIIM_STRING | MIIM_DATA | MIIM_STATE;
                                 menuInfo.wID = atoi(l + 3) + 1;
                                 menuInfo.dwItemData = l;
                                 menuInfo.fType = MFT_STRING;
-                                menuInfo.dwTypeData = ln;
+                                menuInfo.dwTypeData = miText;
                                 menuInfo.cch = strlen(ln);
-                                InsertMenuItemA(
+                                InsertMenuItemW(
                                     hMenu,
                                     i,
                                     TRUE,
                                     &menuInfo
                                 );
+
+                                free(miText);
                             }
                         }
                         numChRd = getline(&line, &bufsiz, f);
@@ -1420,6 +1417,16 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
             stdout
         );
     }
+    dwSize = LOCALE_NAME_MAX_LENGTH;
+    locale = GetUserDefaultUILanguage();
+    RegQueryValueExW(
+        hKey,
+        TEXT("Language"),
+        0,
+        NULL,
+        &locale,
+        &dwSize
+    );
     if (hKey)
     {
         RegCloseKey(hKey);

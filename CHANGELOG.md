@@ -2,9 +2,87 @@
 
 This document includes the same release notes as in the [Releases](https://github.com/valinet/ExplorerPatcher/releases) section on GitHub.
 
-## 22000.258.31.0
+## 22000.318.36
 
-Tested on build: 22000.258.
+Tested on build 22000.318.
+
+#### Fixes
+
+* Fixes an issue that prevented Explorer from starting up when Windows 10 taskbar was disabled and Windows 10 window switcher was enabled (#313) (.1)
+* Lots of bug and issue fixes for shell extension failing to work under certain circumstances (#259)
+
+## 22000.318.35
+
+Tested on build 22000.318.
+
+#### Feature enhancements
+
+* Start menu position can now be changed without needing to restart File Explorer
+
+#### Fixes
+
+* Improved reliability of Start menu positioning when the monitor topology changes and at startup
+* Start menu injection returns error codes from the remote process in the debug console
+* Other Start menu quality of life improvements
+
+## 22000.318.34
+
+Tested on build 22000.318.
+
+#### New features
+
+* Added option to enable legacy list view ("SysListView32") in File Explorer (credit @toiletflusher, @anixx from WinClassic) (.1)
+
+#### Feature enhancements
+
+* Built-in support for build 22000.318
+
+## 22000.282.33
+
+Tested on build 22000.282.
+
+#### New features
+
+* Ability to choose language switcher flyout style (option available in the "Properties" - "System tray" section)
+
+#### Fixes
+
+* The key above the `Tab` key is now correctly identified for all keyboard layouts, so the per-application Windows 10 window switcher mode works correctly (#283)
+
+## 22000.282.32
+
+Tested on build 22000.282.
+
+#### New features
+* Windows 10 window switcher features new configuration options:
+  * Always show switcher on primary monitor
+  * Show windows only from current monitor
+  * Theme selector: Mica, Acrylic and None
+  * Corner preference: Rounded, Rounded small, Not rounded
+  * More options for row height
+  * [Alt]+[\`] shows the switcher only for windows of the foreground application
+  * `[Enter]` switches to selected window (same as `[Space]`) (#240) (.1)
+  * Navigation using arrow keys (#240) (.1)
+* Ability to choose behavior for Cortana button: hidden, shown and opens Cortana, shown and opens Widgets (#255) (.3)
+* Builds are now automatic, generated as soon as new content is pushed to the repository and compiled on GitHub's infrastructure (.6)
+
+#### Feature enhancements
+* Clock context menu options "Adjust date/time" and "Customize notification icons" open in Control Panel instead of Settings
+
+#### Fixes
+* Taskbar context menu not displaying properly when using classic theme mitigations should now be fixed
+* Reliability improvements, correct injection, avoid double patching
+* All windows should now be properly detected and included in the Windows 10 window switcher
+* Performance enhancements for Windows 10 window switcher: layouts are now precomputed when a window change occurs, so it should be very fast to open and consistent, no matter the current load; also, fast switching does not trigger the window, as it should
+* "Show Cortana button" taskbar menu entry now works again (#252) (.2)
+* Fixes a bug that prevented correct opening of some applications (like `powershell`) when EP was registered as shell extension (#256) (.4) - PLEASE NOTE THAT RUNNING AS SHELL EXTENSION IS STILL EXPERIMENTAL, UNSUPPORTED, AND ONLY RECOMMENDED FOR SPECIFIC USE CASES THAT YOU SHOULD KNOW ABOUT ALREADY; otherwise, just dropping the DLL in `C:\Windows` is enough
+* Windows 10 window switcher switcher now correctly displays UWP apps immediately after launch (#266) (.5)
+* Selection and highlight rectangle are now correctly drawn when using light theme on Windows 10 window switcher (.5)
+* Keyboard selection (left, right, up, down, space, Return) also works when window switcher is shown by holding down the `ALT` key (#263) (.7)
+
+## 22000.282.31
+
+Tested on build: 22000.282.
 
 #### New features
 
@@ -13,11 +91,16 @@ Tested on build: 22000.258.
 * Possibility to use the legacy clock flyout
 * Possibility to use the legacy volume flyout
 * Fixes to fully support the classic theme, with a functional taskbar, system tray, Explorer windows, working context menus; read more about this feature [here](https://github.com/valinet/ExplorerPatcher/discussions/101)
+* Choose type of flyout for clock (.1)
+* Compatibility with build 22000.282 (.2)
 
 #### Feature enhancements
 
 * Reorganized settings in the GUI
 * Added option not to have an accelerator for the `Properties` menu entry in `Win`+`X` (#162)
+* The "Adjust date/time" and "Customize notification icons" links in the clock context menu now open the more versatile Control Panel applets (.4)
+* The console can now be disabled and then dismissed without causing the Explorer process to restart (.4)
+* Implemented a new exported function which restarts File Explorer cleanly, reloading your folder windows: `rundll32 C:\Windows\dxgi.dll,ZZRestartExplorer` (.4)
 
 #### Fixes
 
@@ -25,8 +108,17 @@ Tested on build: 22000.258.
 * Fixed an issue that prevented Start from opening again until Explorer was restarted after opening File Explorer via the Start menu Explorer icon (#145)
 * Fixed patching in libvalinet
 * Fixed GUI launch path; GUI now launches in an external process, survives Explorer restarts
+* Addresses an issue that prevented correct operation under certain circumstances and that could lead to a rare bug where Explorer would crash after a Control Panel window was opened (also related to Control Panel windows not always respecting preferences like "disable navigation bar") (.3)
+* Fixed a bug that caused the cursor to move when invoking `Win`+`X` (.4)
+* Fixed a bug that caused incorrect positioning of `Win`+`X` when the main taskbar was present on a monitor different than the primary one (.4)
+* The Start menu now automatically reloads in the background only when its settings change, instead of when any settings change (.4)
+* Improved the reliability of the "Restart File Explorer" link in the Properties GUI (.4)
+* Improved the detection of scenarios when the patcher should inject and apply the full set of patches to File Explorer (.4)
+* Other bug fixes (.4)
 
 #### Experimental
+
+**PLEASE NOTE THAT RUNNING AS SHELL EXTENSION IS STILL EXPERIMENTAL, UNSUPPORTED, AND ONLY RECOMMENDED FOR SPECIFIC USE CASES THAT YOU SHOULD KNOW ABOUT ALREADY. IT IS NOT REQUIRED FOR OBTAINING ANY OF THE CORE FUNCTIONALITY, IT IS AVAILABLE ONLY FOR SOME ADVANCED USE CASES AND IS STILL A BIGGER WORK-IN-PROGRESS THAN THE MAIN PROJECT.**
 
 The application can now be registered as a shell extension. This will enable the Explorer related functionality to work in Open/Save file dialogs as well. This is especially useful for users wanting proper support of the classic theme in Windows 11.
 
@@ -35,6 +127,7 @@ Please note that this is experimental. For the moment, the preferred installatio
 To enable this, put the 2 DLLs (`ExplorerPatcher.amd64.dll` and `ExplorerPatcher.IA-32.dll`) in a secure folder (for example, `C:\Program Files\ExplorerPatcher`). Then, in that folder, run this command: `regsvr32 ExplorerPatcher.amd64.dll`. After elevation, a message will display informing you of the operation outcome, and if it went well, Explorer will restart displaying the old taskbar.
 
 To uninstall, run `regsvr32 /u ExplorerPatcher.amd64.dll` in the same folder and preferably reboot the computer to unload the DLLs from all applications. Then, the files can be deleted just fine.
+
 
 ## 22000.258.30.6
 

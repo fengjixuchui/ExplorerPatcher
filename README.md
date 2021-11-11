@@ -94,6 +94,8 @@ You can try one of my other utilities available [here](https://github.com/valine
 
 You can manually configure the application by setting registry values. The registry entries supported by this application are described in [this file](https://github.com/valinet/ExplorerPatcher/blob/master/ExplorerPatcher/settings.reg).
 
+To open the configuration interface manually (for example, when unable to access it via `Win`+`X` - Properties), run the following command: `rundll32 C:\Windows\dxgi.dll,ZZGUI`.
+
 ## More configuration
 Even more registry configuration settings are described in the following document, make sure to take a look on it [here](https://github.com/valinet/ExplorerPatcher/issues/9).
 
@@ -126,6 +128,8 @@ If you still feel a bit iffy running this, then that's why the source code is av
 Hooking is done using the excellent [funchook](https://github.com/kubo/funchook) library (GPLv2 with linking exception), which in turn is powered by the [diStorm3](https://github.com/gdabah/distorm/) (3-clause BSD) disassembler. Thus, I am offering this under GNU General Public License Version 2.0, which I believe is compatible.
 
 ## Compiling
+
+If you encounter some issues when following the steps below, or should you want to find out more information and the latest tips from other users/me regarding how to pull this off, consult the relevant thread in Discussions located [here](https://github.com/valinet/ExplorerPatcher/discussions/190).
 
 The following prerequisites are necessary in order to compile this project:
 
@@ -164,7 +168,7 @@ Steps:
 
    If "cmake" is not found as a command, type its full path, or have its folder added to PATH.
 
-   Type "Win32" instead of "x64" above, if compiling for x86. The command above works for x64.
+   Type "Win32" instead of "x64" above, if compiling for x86 (IA-32). The command above works for x64 (amd64).
 
    Now, in the `libs\funchook\build` folder, open the file `funchook-static.vcxproj` with any text editor, search and replace all occurences of `<RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>` with `<RuntimeLibrary>MultiThreaded</RuntimeLibrary>`.
 
@@ -176,23 +180,25 @@ Steps:
 
 3. Compile ExplorerPatcher
 
-   * Double click the ExplorerPatcher.sln to open the solution in Visual Studio. Choose Release and your processor architecture in the toolbar. Press F6 to compile.
+   * Double click the `ExplorerPatcher.sln` file to open the solution in Visual Studio. Choose Release and your processor architecture in the toolbar. Press `[Ctrl]`+`[Shift]`+`[B]` or choose "Build" - "Build solution" to compile.
 
    * Open an "x86 Native Tools Command Prompt for VS 2019" (for x86), or "x64 Native Tools Command Prompt for VS 2019" (for x64) (search that in Start), go to folder containing solution file and type:
 
      * For x86:
 
        ```
-       msbuild ExplorerPatcher.sln /property:Configuration=Release /property:Platform=x86
+       msbuild ExplorerPatcher.sln /property:Configuration=Release /property:Platform=IA-32
        ```
 
      * For x64:
 
        ```
-       msbuild ExplorerPatcher.sln /property:Configuration=Release /property:Platform=x64
+       msbuild ExplorerPatcher.sln /property:Configuration=Release /property:Platform=amd64
        ```
 
-   The resulting exe and dll will be in "Release" folder (if you chose x86), or "x64\Release" (if you chose x64) in the folder containing the solution file.
+   Debug builds mostly work as well, although they may have some quirks or issues. I mostly test the software as release builds.
+
+   The resulting libraries will be in the "build\Release" folder in the folder containing the solution file.
 
 That's it. later, if you want to recompile, make sure to update the repository and the submodules first:
 

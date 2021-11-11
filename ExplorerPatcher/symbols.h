@@ -41,4 +41,12 @@ typedef struct _DownloadSymbolsParams
 DWORD DownloadSymbols(DownloadSymbolsParams* params);
 
 BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule);
+
+inline BOOL IsBuild(RTL_OSVERSIONINFOW rovi, DWORD32 ubr, DWORD BuildNumber, DWORD BuildMinor)
+{
+    return (rovi.dwMajorVersion == 10 &&
+        rovi.dwMinorVersion == 0 &&
+        rovi.dwBuildNumber == BuildNumber &&
+        ubr == BuildMinor);
+}
 #endif

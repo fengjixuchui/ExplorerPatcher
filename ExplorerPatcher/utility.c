@@ -99,18 +99,6 @@ const IActivationFactoryAA XamlExtensionsFactory = {
 };
 #pragma endregion
 
-int FileExistsW(wchar_t* file)
-{
-    WIN32_FIND_DATAW FindFileData;
-    HANDLE handle = FindFirstFileW(file, &FindFileData);
-    int found = handle != INVALID_HANDLE_VALUE;
-    if (found)
-    {
-        FindClose(handle);
-    }
-    return found;
-}
-
 void printf_guid(GUID guid) 
 {
     printf("Guid = {%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}\n",
@@ -276,6 +264,12 @@ __declspec(dllexport) CALLBACK ZZLaunchExplorerDelayed(HWND hWnd, HINSTANCE hIns
     ZZLaunchExplorer(hWnd, hInstance, lpszCmdLine, nCmdShow);
 }
 
+__declspec(dllexport) CALLBACK ZZRestartExplorer(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int nCmdShow)
+{
+    BeginExplorerRestart();
+    FinishExplorerRestart();
+}
+
 POINT GetDefaultWinXPosition(BOOL bUseRcWork, BOOL* lpBottom, BOOL* lpRight, BOOL bAdjust)
 {
     if (lpBottom) *lpBottom = FALSE;
@@ -393,52 +387,22 @@ POINT GetDefaultWinXPosition(BOOL bUseRcWork, BOOL* lpBottom, BOOL* lpRight, BOO
     return point;
 }
 
-void QueryVersionInfo(HMODULE hModule, WORD Resource, DWORD* dwLeftMost, DWORD* dwSecondLeft, DWORD* dwSecondRight, DWORD* dwRightMost)
-{
-    HRSRC hResInfo;
-    DWORD dwSize;
-    HGLOBAL hResData;
-    LPVOID pRes, pResCopy;
-    UINT uLen;
-    VS_FIXEDFILEINFO* lpFfi;
-
-    hResInfo = FindResource(hModule, MAKEINTRESOURCE(Resource), RT_VERSION);
-    dwSize = SizeofResource(hModule, hResInfo);
-    hResData = LoadResource(hModule, hResInfo);
-    pRes = LockResource(hResData);
-    pResCopy = LocalAlloc(LMEM_FIXED, dwSize);
-    CopyMemory(pResCopy, pRes, dwSize);
-    FreeResource(hResData);
-
-    VerQueryValue(pResCopy, TEXT("\\"), (LPVOID*)&lpFfi, &uLen);
-
-    DWORD dwFileVersionMS = lpFfi->dwFileVersionMS;
-    DWORD dwFileVersionLS = lpFfi->dwFileVersionLS;
-
-    *dwLeftMost = HIWORD(dwFileVersionMS);
-    *dwSecondLeft = LOWORD(dwFileVersionMS);
-    *dwSecondRight = HIWORD(dwFileVersionLS);
-    *dwRightMost = LOWORD(dwFileVersionLS);
-
-    LocalFree(pResCopy);
-}
-
 void* ReadFromFile(wchar_t* wszFileName, DWORD* dwSize)
 {
     void* ok = NULL;
     HANDLE hImage = CreateFileW(wszFileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hImage)
     {
-        DWORD dwFileSize;
+        LARGE_INTEGER dwFileSize;
         GetFileSizeEx(hImage, &dwFileSize);
-        if (dwFileSize)
+        if (dwFileSize.LowPart)
         {
-            void* pImage = malloc(dwFileSize);
+            void* pImage = malloc(dwFileSize.LowPart);
             if (pImage)
             {
                 DWORD dwNumberOfBytesRead = 0;
-                ReadFile(hImage, pImage, dwFileSize, &dwNumberOfBytesRead, NULL);
-                if (dwFileSize == dwNumberOfBytesRead)
+                ReadFile(hImage, pImage, dwFileSize.LowPart, &dwNumberOfBytesRead, NULL);
+                if (dwFileSize.LowPart == dwNumberOfBytesRead)
                 {
                     ok = pImage;
                     *dwSize = dwNumberOfBytesRead;
