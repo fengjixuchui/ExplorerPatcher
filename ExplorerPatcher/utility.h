@@ -4,6 +4,7 @@
 //#define USE_PRIVATE_INTERFACES
 #endif
 #include <Windows.h>
+#include <stdio.h>
 #include <tchar.h>
 #include <windows.data.xml.dom.h>
 #include <accctrl.h>
@@ -15,11 +16,24 @@
 #define _LIBVALINET_INCLUDE_UNIVERSAL
 #include <valinet/universal/toast/toast.h>
 #include "queryversion.h"
+#pragma comment(lib, "Psapi.lib")
 
 #define APPID L"Microsoft.Windows.Explorer"
 #define REGPATH "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ExplorerPatcher"
-#define SPECIAL_FOLDER CSIDL_APPDATA
-#define APP_RELATIVE_PATH "\\ExplorerPatcher"
+#define SPECIAL_FOLDER CSIDL_PROGRAM_FILES
+#define SPECIAL_FOLDER_LEGACY CSIDL_APPDATA
+#define PRODUCT_NAME "ExplorerPatcher"
+#define PRODUCT_PUBLISHER "VALINET Solutions SRL"
+#define APP_RELATIVE_PATH "\\" PRODUCT_NAME
+#define EP_CLSID "{D17F1E1A-5919-4427-8F89-A1A8503CA3EB}"
+#define DOSMODE_OFFSET 78
+#define SETUP_UTILITY_NAME "ep_setup.exe"
+#define TOAST_BUFSIZ 1024
+#define SEH_REGPATH "Control Panel\\Quick Actions\\Control Center\\QuickActionsStateCapture\\ExplorerPatcher"
+#define EP_SETUP_HELPER_SWITCH "/CreateExplorerShellUnelevatedAfterServicing"
+
+#define WM_MSG_GUI_SECTION WM_USER + 1
+#define WM_MSG_GUI_SECTION_GET 1
 
 // This allows compiling with older Windows SDKs as well
 #ifndef DWMWA_USE_HOSTBACKDROPBRUSH
@@ -59,16 +73,41 @@
 #define DWMWA_MICA_EFFFECT 1029
 #endif
 
+DEFINE_GUID(CLSID_ImmersiveShell,
+    0xc2f03a33,
+    0x21f5, 0x47fa, 0xb4, 0xbb,
+    0x15, 0x63, 0x62, 0xa2, 0xf2, 0x39
+);
+
+typedef struct _StuckRectsData
+{
+    int pvData[6];
+    RECT rc;
+    POINT pt;
+} StuckRectsData;
+
+HRESULT FindDesktopFolderView(REFIID riid, void** ppv);
+
+HRESULT GetDesktopAutomationObject(REFIID riid, void** ppv);
+
+HRESULT ShellExecuteFromExplorer(
+    PCWSTR pszFile,
+    PCWSTR pszParameters,
+    PCWSTR pszDirectory,
+    PCWSTR pszOperation,
+    int nShowCmd
+);
+
 #pragma region "Weird stuff"
-INT64 nimpl4_1(INT64 a1, DWORD* a2);
-INT64 nimpl4_0(INT64 a1, DWORD* a2);
-__int64 __fastcall nimpl2(__int64 a1, uintptr_t* a2);
-ULONG nimpl3();
-HRESULT nimpl();
-HRESULT nimpl1(__int64 a1, uintptr_t* a2, uintptr_t* a3);
-HRESULT nimpl1_2(__int64 a1, uintptr_t* a2, uintptr_t* a3);
-HRESULT nimpl1_3(__int64 a1, uintptr_t* a2, uintptr_t* a3);
-__int64 nimpl4(__int64 a1, __int64 a2, __int64 a3, BYTE* a4);
+INT64 STDMETHODCALLTYPE nimpl4_1(INT64 a1, DWORD* a2);
+INT64 STDMETHODCALLTYPE nimpl4_0(INT64 a1, DWORD* a2);
+__int64 STDMETHODCALLTYPE nimpl2(__int64 a1, uintptr_t* a2);
+ULONG STDMETHODCALLTYPE nimpl3();
+HRESULT STDMETHODCALLTYPE nimpl();
+HRESULT STDMETHODCALLTYPE nimpl1(__int64 a1, uintptr_t* a2, uintptr_t* a3);
+HRESULT STDMETHODCALLTYPE nimpl1_2(__int64 a1, uintptr_t* a2, uintptr_t* a3);
+HRESULT STDMETHODCALLTYPE nimpl1_3(__int64 a1, uintptr_t* a2, uintptr_t* a3);
+__int64 STDMETHODCALLTYPE nimpl4(__int64 a1, __int64 a2, __int64 a3, BYTE* a4);
 typedef struct _IActivationFactoryAA
 {
     CONST_VTBL struct IActivationFactoryVtbl* lpVtbl;
@@ -103,7 +142,7 @@ __declspec(dllexport) CALLBACK ZZLaunchExplorer(HWND hWnd, HINSTANCE hInstance, 
 
 __declspec(dllexport) CALLBACK ZZLaunchExplorerDelayed(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int nCmdShow);
 
-POINT GetDefaultWinXPosition(BOOL bUseRcWork, BOOL* lpBottom, BOOL* lpRight, BOOL bAdjust);
+__declspec(dllexport) CALLBACK ZZRestartExplorer(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLine, int nCmdShow);
 
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
 #define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
@@ -211,6 +250,12 @@ static void(*GetThemeName)(void*, void*, void*);
 static BOOL AppsShouldUseDarkMode() { return TRUE; }
 
 void* ReadFromFile(wchar_t* wszFileName, DWORD* dwSize);
+
+int ComputeFileHash(LPCWSTR filename, LPCSTR hash, DWORD dwHash);
+
+void LaunchPropertiesGUI(HMODULE hModule);
+
+BOOL SystemShutdown(BOOL reboot);
 
 inline long long milliseconds_now() {
     LARGE_INTEGER s_frequency;
@@ -354,6 +399,23 @@ inline BOOL ExitExplorer()
     return PostMessageW(hWndTray, 0x5B4, 0, 0);
 }
 
+inline void StartExplorerWithDelay(int delay)
+{
+    WCHAR wszPath[MAX_PATH];
+    ZeroMemory(wszPath, MAX_PATH * sizeof(WCHAR));
+    GetWindowsDirectoryW(wszPath, MAX_PATH);
+    wcscat_s(wszPath, MAX_PATH, L"\\explorer.exe");
+    Sleep(delay);
+    ShellExecuteW(
+        NULL,
+        L"open",
+        wszPath,
+        NULL,
+        NULL,
+        SW_SHOWNORMAL
+    );
+}
+
 inline void StartExplorer()
 {
 
@@ -416,5 +478,14 @@ inline void StartExplorer()
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
     }
+}
+
+inline BOOL IncrementDLLReferenceCount(HINSTANCE hinst)
+{
+    HMODULE hMod;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        hinst,
+        &hMod);
 }
 #endif

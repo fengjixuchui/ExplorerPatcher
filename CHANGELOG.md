@@ -2,6 +2,160 @@
 
 This document includes the same release notes as in the [Releases](https://github.com/valinet/ExplorerPatcher/releases) section on GitHub.
 
+## 22000.348.40
+
+Tested on build 22000.348.
+
+#### Highlights
+
+* Primary taskbar remembers position when moved to a secondary monitor (multiple issues, like #504)
+* Ability to set Control Center as network icon action (merged #492)
+* Added possibility to use the original Windows 10 (Alt-Tab) window switcher; thus, the available options are now:
+  * Windows 11 switcher - full screeen, slow, tiny selection outline, slow opening times
+  * Windows 10 switcher - pretty good but lacks customization options
+  * Windows NT switcher - the classic simple icon-based interface hosted by `csrss`
+  * Simple Window Switcher - my own take on implementing this kind of functionality
+* Registry access in the "Properties" GUI is now virtualized; that means, the same lightweight infrastructure is maintained but more complex behaviors can be offered via the improved backend; as such, this version introduces the following new configuration options:
+  * Primary and secondary taskbar placement
+  * Automatically hide the taskbar
+* Proper activation of the "Properties" window when another instance is running and minimized
+* Symbols parsing success notification displays for longer
+* Debug builds are clearly indicated in the "About" page of "Properties"
+* Fixed solution to properly produce a debug setup program
+* Possibility to uninstall by renaming `ep_setup.exe` to `ep_uninstall.exe` and running that (.4)
+* Fixed a bug that crashed the "Properties" GUI when toggling certain settings (#527) (.6)
+* File Explorer is restarted unelevated when servicing the application (#528) (.7)
+* Reliability improvements for File Explorer restarts (#529) (.7)
+* When changing the main taskbar position and restarting File Explorer, the new position is now correctly saved and applied when File Explorer restarts (#523) (.7)
+* Mitigation for the issue described in #416 (.7)
+
+#### Simple Window Switcher
+
+* Dramatically improved performance, refactored application; switched to building the window lists faster, on demand, so that the proper windows are always displayed (as far as I remember, the latest `IsAltTabWindow` is based on a function called `IsTaskedWindow` ripped straight from AltTab.dll from Windows 7 6.1.7600.16385)
+* Proper history of window activations is maintained internally
+* Implemented support for layered windows, thus making transparency possible when using the default theme (Acrylic and Mica brushes are still available, but those have the disadvantage that the system can disable them in certain scenarios, like saving energy when working on battery power)
+* Improved reliability of startup delay and window dismiss when quickly Alt-Tabbing
+* Window icons are retrieved async now
+* Better icon drawing using GDI+ flat API
+* Reversed UWP apps detection to checking whether the executable is called ApplicationFrameHost.exe
+* Added some more debug messages
+* Fixed some rendering problems when themes are disabled
+* Fixed regression of [#161](https://github.com/valinet/ExplorerPatcher/issues/161#issuecomment-986234002) (.1)
+* Possibility to disable per-application window lists (`Alt`+`) ([#283](https://github.com/valinet/ExplorerPatcher/issues/283#issuecomment-986261712)) (.2)
+* Fixed bug that prevented proper loading of default settings (.3)
+* Implemented a mitigation for #516: gestures for switching apps on Windows Precision Touchpad devices trigger the Windows 10 switcher instead of the Windows 11 switcher, which is much closer to how Simple Window Switcher looks and behaves; ideally, a full solution for this should be provided in the future, in the form of support for activation and navigation using Windows Precision Touchpad gestures in the Simple Window Switcher (.5)
+* Fixed an issue that could hung the application and made window switchers unavailable (#525) (many thanks to @jdp1024) (.7)
+* Possibility to configure window padding (.7)
+
+## 22000.348.39
+
+Tested on build 22000.348.
+
+#### New features
+
+* Built-in support for build 22000.348.
+* Implemented option to toggle taskbar auto-hide when double clicking the main taskbar (#389)
+* Running `ep_setup.exe` again while EP is already installed will now update the program to the latest version. To uninstall, as the previous behavior did, run `ep_setup.exe /uninstall`
+* Implemented absolute height and width parameters for the Windows 10 switcher. These are especially useful for ultra wide monitors, in a scenario similar to the one described in [this post](https://github.com/valinet/ExplorerPatcher/discussions/110#discussioncomment-1673007) - to configure, set `MaxWidthAbs` and/or `MaxHeightAbs` DWORD values in `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\ExplorerPatcher\sws` (#110)
+* Provides a simple mechanism for chainloading a custom library when the shell interface is created, from which you can execute your custom code (subject to change, see [this](https://github.com/valinet/ExplorerPatcher/discussions/408#discussioncomment-1674348) for more details) (#408)
+
+#### Feature enhancements
+
+* Option to receive pre-release versions, if available, when checking for updates
+* Improved behavior regarding symbol data information; please refer to https://github.com/valinet/ExplorerPatcher/wiki/Symbols for more information (.1)
+
+#### Fixes
+
+* Fixed mismatches between defaults from EP and Windows' defaults
+* Application starts with limited functionality on builds lacking hardcoded symbol information; symbol downloading is disabled for now, by default, but can be enabled in the "Advanced" settings section of "Properties"
+* Improvements to how hung windows are treated by the Windows 10 window switcher; fixed an issue that severely delayed the time it took the window switcher to display when a window hung on the screen (#449)
+* Clicking "Close" in the Windows 10 window switcher is now more tolerant to small mouse movements (#110) (.1)
+* The existing "Properties" window is properly displayed if opening it when another instance is already running and is minimized (.2)
+
+## 22000.318.38
+
+Tested on build 22000.318.
+
+#### New features
+
+* Functional Windows 10 network flyout
+* Functional Windows 10 battery flyout
+* Implemented support for Windows 7 battery flyout (#274)
+* Implemented `/extract` switch which unpacks the files from `ep_setup.exe` to disk (#396) (.1):
+  * `ep_setup /extract` - extracts `ExplorerPatcher.IA-32.dll` and `ExplorerPatcher.amd64.dll` to current directory
+  * `ep_setup /extract test` - extracts to `test` folder in current directory
+  * `ep_setup /extract "C:\test with space"` - extracts to `C:\test with space` directory
+* Taskbar toolbar layouts are preserved when switching between Windows 10 and Windows 11 taskbars and in general (these will be reset when installing this update but should be subsequently remembered) (#395) (.2)
+* Implemented option to toggle taskbar auto-hide when double clicking the main taskbar (#389) (.3)
+* Running `ep_setup.exe` again while EP is already installed will now update the program to the latest version. To uninstall, as the previous behavior did, run `ep_setup.exe /uninstall` (.4)
+* Implemented absolute height and width parameters for the Windows 10 switcher. These are especially useful for ultra wide monitors, in a scenario similar to the one described in [this post](https://github.com/valinet/ExplorerPatcher/discussions/110#discussioncomment-1673007) - to configure, set `MaxWidthAbs` and/or `MaxHeightAbs` DWORD values in `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\ExplorerPatcher\sws` (#110) (.5)
+* Provides a simple mechanism for chainloading a custom library when the shell interface is created, from which you can execute your custom code (subject to change, see [this](https://github.com/valinet/ExplorerPatcher/discussions/408#discussioncomment-1674348) for more details) (#408) (.6)
+
+
+#### Feature enhancements
+
+* Improved reliability when invoking Control Center (`Win`+`A`) when the taskbar icon is disabled (the icon should now not reappear anymore sometimes) (#242)
+* Small reorganization of some options in "Properties"
+* Option to receive pre-release versions, if available, when checking for updates (.9)
+
+#### Fixes
+
+* Windows 10 network and battery flyout should now always launch when the tray icon is clicked (#410) (.1)
+* Fixed mismatches between defaults from EP and Windows' defaults (.3)
+* Application starts with limited functionality on builds lacking hardcoded symbol information; symbol downloading is disabled for now, by default, but can be enabled in the "Advanced" settings section of "Properties" (.7)
+* Improvements to how hung windows are treated by the Windows 10 window switcher; fixed an issue that severely delayed the time it took the window switcher to display when a window hung on the screen (#449) (.8)
+
+## 22000.318.37
+
+Tested on build 22000.318 and 22000.346 (currently in Windows Insider beta and release preview channels).
+
+#### New features
+
+* The configuration interface is now accessed by right clicking on the taskbar and choosing "Properties" (previously, it was available in the `Win`+`X` menu). This behavior works when either the Windows 10 or Windows 11 taskbar is enabled. As well, you can launch the "Properties" window directly by pressing `Win`+`R` and typing `rundll32 C:\Windows\dxgi.dll,ZZGUI`, followed by `Enter`.
+* Implemented a setup program:
+  * To install, simply run `ep_setup.exe`. File Explorer will restart and the program will be enabled right away.
+  * To uninstall, there are 2 options:
+    * Run `ep_setup.exe` again.
+    * Via "Programs and Features" in Control Panel, or "Apps and features" in the Settings app.
+  * Learn more about the setup program [here](https://github.com/valinet/ExplorerPatcher/wiki/Installer-How-To)
+* Implemented automatic updates; there are 3 settings to choose from when File Explorer starts:
+  * Notify about available updates (default) - the program will check for updates and display a notification if a new build is available; you can go to "Properties" and install the update from there
+  * Prompt to install available updates - the program will check for updates, download them if any, and prompt you to install them automatically
+  * Do not check for updates - the program never checks for updates in the background
+  * Of course, you can manually check for updates at any point using "Properties" - "Updates" - "Check for updates". To install the update you were notified about, go to "Properties" - "Updates" - "Install latest version".
+  * When installing an update, you will be prompted using UAC to allow elevation - always check that the update originates from matches what you expect; official updates are currently served via https://github.com/valinet/ExplorerPatcher.
+  * Learn more about how to configure updates on your system, including how to set a custom endpoint [here](https://github.com/valinet/ExplorerPatcher/wiki/Configure-updates)
+* Implemented a proper right click menu for the Windows 11 taskbar - it displays the most common options, similar to previous Windows releases and the Windows 10 taskbar, including frequently accessed items like "Taskbar settings", "Task Manager" and "Show the desktop"
+* System tray icons are now left intact when switching between the Windows 10 and Windows 11 taskbars, or when switching builds, reinstalling the application etc. Basically, now, once you set a certain layout for the system tray with the Windows 10 taskbar, it will always be remembered, instead of the annoying behavior where Windows was discarding your choices in order to accommodate the Windows 11 taskbar
+
+#### Feature enhancements
+
+* Hardcoded symbols are now based on file hashes, not build numbers
+* Better organization for the settings in "Properties"
+* Update toast notifications are displayed only as long as they are required. Subsequent notifications no longer have to wait for the previous ones to timeout, but rather they replace the previous ones (#346) (.2)
+
+#### Fixes
+
+* Mitigated an issue that prevented the Windows 11 taskbar from displaying properly under certain circumstances
+* Fixed an issue that would crash the Windows 11 taskbar when it was enabled after positioning the Windows 10 taskbar on either side of the screen (left/right)
+* Fixed a bug in "Windows 10 Window switcher" that may have lead to `explorer.exe` crashing when more than 20 windows are opened on the screen (probably the cause for a lot of crashes)
+* Fixed numerous issues when injecting processes, including as shell extension; reliability improvements
+* Adjusted the padding of the system tray hidden icons indicator so that it is now properly centered vertically when using the classic theme mitigations
+* Fixed a memory leak in "Settings Manager"
+* Removed verbose output from "Settings Manager"
+* Corrected import from `dxgi.dll`
+* Fixed typo in configuration UI (#346) (.1)
+* Fixed typos and spelling in error message (#346) (.2)
+* Fixed bug that prevented "Properties" from working when invoked from Quick Launch or other toolbars (#349) (.2)
+* As you may have noticed, releases do not contain unpacked files anymore. Thus, for people looking for a quick way to get the unpacked files, the release notes now include a link to the artifacts generated during during the build process. The artifacts include the usual DLLs (including `dxgi.dll`), plus symbol files and all the helper executables generated during the build. (#351) (.2)
+* Setup program version is synchronized with the version of the application (.2)
+* Fixed a mismatch between the default value for the setting "Add shortcut to program settings in Win+X menu" displayed in the UI and actually used in the software (#352) (.2)
+* Fixed an issue that prevented "Restore default settings" in the "Properties" UI from working (#374) (.3)
+* Improved some wording in the Properties UI (#377) (.4)
+* Added option to show separators between toolbars in the taskbar (#379) (.4)
+* "Properties" is restarted when doing an install/update and closed when uninstalling the application (.5)
+* "Properties" can open the last used section when starting (.5)
+
 ## 22000.318.36
 
 Tested on build 22000.318.

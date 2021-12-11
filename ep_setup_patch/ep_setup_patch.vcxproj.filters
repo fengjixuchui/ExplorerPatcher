@@ -15,18 +15,15 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="ep_generate_release_description.c">
+    <ClCompile Include="ep_setup_patch.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\ExplorerPatcher\getline.c">
+    <ClCompile Include="..\ExplorerPatcher\utility.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\ExplorerPatcher\getline.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="..\ExplorerPatcher\queryversion.h">
+    <ClInclude Include="..\ExplorerPatcher\utility.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

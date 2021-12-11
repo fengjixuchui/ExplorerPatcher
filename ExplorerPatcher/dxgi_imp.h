@@ -22,10 +22,6 @@ __declspec(dllexport) HRESULT CreateDXGIFactory(void* p1, void** p2)
     return CreateDXGIFactoryFunc(p1, p2);
 }
 static HRESULT(*CreateDXGIFactory1Func)(void*, void**);
-__declspec(dllexport) HRESULT CreateDXGIFactory1(void* p1, void** p2)
-{
-    return CreateDXGIFactory1Func(p1, p2);
-}
 static HRESULT(*CreateDXGIFactory2Func)(UINT, void*, void**);
 __declspec(dllexport) HRESULT CreateDXGIFactory2(UINT p1, void* p2, void** p3)
 {
@@ -79,7 +75,7 @@ __declspec(dllexport) HRESULT PIXEndCapture()
 static HRESULT(*PIXGetCaptureStateFunc)();
 __declspec(dllexport) HRESULT PIXGetCaptureState()
 {
-    return PIXGetCaptureState();
+    return PIXGetCaptureStateFunc();
 }
 static HRESULT(*SetAppCompatStringPointerFunc)(SIZE_T, void*);
 __declspec(dllexport) HRESULT SetAppCompatStringPointer(SIZE_T p1, void* p2)
