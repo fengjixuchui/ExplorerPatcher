@@ -28,6 +28,10 @@ Tested on build 22000.348.
 * Reliability improvements for File Explorer restarts (#529) (.7)
 * When changing the main taskbar position and restarting File Explorer, the new position is now correctly saved and applied when File Explorer restarts (#523) (.7)
 * Mitigation for the issue described in #416 (.7)
+* Fixed a bug that prevented the Windows 10 window switcher from displaying when it was enabled, instead falling back to the Windows NT window switcher (#548) (.8)
+* Fixed the "Show People in the taskbar" option and made it not require a restart to apply (#554) (.10)
+* Ability to choose look of Snap Assist (window list when snapping a window): Windows 11 or Windows 11 style (.11)
+* Fixed a bug that prevented the correct set up of "DisplayVersion" registry entry in the uninstall information registry key (.11)
 
 #### Simple Window Switcher
 
@@ -46,6 +50,8 @@ Tested on build 22000.348.
 * Implemented a mitigation for #516: gestures for switching apps on Windows Precision Touchpad devices trigger the Windows 10 switcher instead of the Windows 11 switcher, which is much closer to how Simple Window Switcher looks and behaves; ideally, a full solution for this should be provided in the future, in the form of support for activation and navigation using Windows Precision Touchpad gestures in the Simple Window Switcher (.5)
 * Fixed an issue that could hung the application and made window switchers unavailable (#525) (many thanks to @jdp1024) (.7)
 * Possibility to configure window padding (.7)
+* Support for closing window with middle button ([#110](https://github.com/valinet/ExplorerPatcher/discussions/110#discussioncomment-1793318)) (.9)
+* Mitigated an issue that may have prevented Explorer from launching correctly when Simple Window Switcher is set as window switcher (.9)
 
 ## 22000.348.39
 

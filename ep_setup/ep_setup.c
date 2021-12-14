@@ -94,9 +94,9 @@ BOOL SetupUninstallEntry(BOOL bInstall, WCHAR* wszPath)
                 }
                 if (!dwLastError)
                 {
-                    PathRemoveFileSpecW(wszPath);
-                    wcscat_s(wszPath, MAX_PATH, L"\\" _T(PRODUCT_NAME) L".amd64.dll");
-                    HMODULE hEP = LoadLibraryExW(wszPath, NULL, LOAD_LIBRARY_AS_DATAFILE);
+                    PathRemoveFileSpecW(wszPath + 1);
+                    wcscat_s(wszPath + 1, MAX_PATH - 2, L"\\" _T(PRODUCT_NAME) L".amd64.dll");
+                    HMODULE hEP = LoadLibraryExW(wszPath + 1, NULL, LOAD_LIBRARY_AS_DATAFILE);
                     if (hEP)
                     {
                         DWORD dwLeftMost = 0;
@@ -106,8 +106,8 @@ BOOL SetupUninstallEntry(BOOL bInstall, WCHAR* wszPath)
 
                         QueryVersionInfo(hEP, VS_VERSION_INFO, &dwLeftMost, &dwSecondLeft, &dwSecondRight, &dwRightMost);
 
-                        WCHAR wszBuf[20];
-                        swprintf_s(wszBuf, 20, L"%d.%d.%d.%d", dwLeftMost, dwSecondLeft, dwSecondRight, dwRightMost);
+                        WCHAR wszBuf[30];
+                        swprintf_s(wszBuf, 30, L"%d.%d.%d.%d", dwLeftMost, dwSecondLeft, dwSecondRight, dwRightMost);
 
                         if (!dwLastError)
                         {
@@ -441,7 +441,7 @@ int WINAPI wWinMain(
         HWND hShellTrayWnd = FindWindowW(L"Shell_TrayWnd", NULL);
         if (hShellTrayWnd)
         {
-            INT res = -1;
+            PDWORD_PTR res = -1;
             if (!SendMessageTimeoutW(hShellTrayWnd, 1460, 0, 0, SMTO_ABORTIFHUNG, 2000, &res) && res)
             {
                 HANDLE hExplorerRestartThread = CreateThread(NULL, 0, BeginExplorerRestart, NULL, 0, NULL);
@@ -721,12 +721,15 @@ int WINAPI wWinMain(
         {
             if (!hShellTrayWnd)
             {
-                MessageBoxW(
-                    NULL,
-                    L"" _T(PRODUCT_NAME) L" has been installed successfully. Start Explorer to have it load up.",
-                    _T(PRODUCT_NAME),
-                    MB_ICONINFORMATION | MB_OK | MB_DEFBUTTON1
-                );
+                if (bOk)
+                {
+                    MessageBoxW(
+                        NULL,
+                        L"" _T(PRODUCT_NAME) L" has been installed successfully. Start File Explorer to have it load up.",
+                        _T(PRODUCT_NAME),
+                        MB_ICONINFORMATION | MB_OK | MB_DEFBUTTON1
+                    );
+                }
             }
             else
             {

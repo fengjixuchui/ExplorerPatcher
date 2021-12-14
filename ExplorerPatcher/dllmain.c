@@ -73,6 +73,7 @@ DWORD bTaskbarAutohideOnDoubleClick = FALSE;
 DWORD dwOrbStyle = 0;
 DWORD bEnableSymbolDownload = TRUE;
 DWORD dwAltTabSettings = 0;
+DWORD dwSnapAssistSettings = 0;
 HMODULE hModule = NULL;
 HANDLE hDelayedInjectionThread = NULL;
 HANDLE hIsWinXShown = NULL;
@@ -3465,6 +3466,17 @@ DWORD WindowSwitcher(DWORD unused)
     while (TRUE)
     {
         //Sleep(5000);
+        while (!FindWindowExW(
+            NULL,
+            NULL,
+            L"Shell_TrayWnd",
+            NULL
+        ))
+        {
+            printf("[sws] Waiting for taskbar...\n");
+            Sleep(100);
+        }
+        Sleep(100);
         sws_ReadSettings(NULL);
         if (sws_IsEnabled)
         {
@@ -3873,6 +3885,15 @@ void WINAPI LoadSettings(BOOL bIsExplorer)
             LaunchPropertiesGUI(hModule);
 #endif
         }
+        dwSize = sizeof(DWORD);
+        RegQueryValueExW(
+            hKey,
+            TEXT("SnapAssistSettings"),
+            0,
+            NULL,
+            &dwSnapAssistSettings,
+            &dwSize
+        );
         RegCloseKey(hKey);
     }
 
@@ -4985,7 +5006,14 @@ LSTATUS twinuipcshell_RegGetValueW(
     {
         if (lRes == ERROR_SUCCESS && *(DWORD*)pvData)
         {
-            *(DWORD*)pvData = 1;
+            if (*(DWORD*)pvData == 3)
+            {
+                *(DWORD*)pvData = 0;
+            }
+            else
+            {
+                *(DWORD*)pvData = 1;
+            }
         }
 
         if (!bOldTaskbar && hWin11AltTabInitialized)
@@ -5307,10 +5335,17 @@ DWORD InjectBasicFunctions(BOOL bIsExplorer, BOOL bInstall)
 INT64(*twinui_pcshell_IsUndockedAssetAvailableFunc)(INT a1, INT64 a2, INT64 a3, const char* a4);
 INT64 twinui_pcshell_IsUndockedAssetAvailableHook(INT a1, INT64 a2, INT64 a3, const char* a4)
 {
-    if (dwAltTabSettings == 3 || dwAltTabSettings == 2)
+    // if IsAltTab and AltTabSettings == Windows 10 or sws (Precision Touchpad gesture)
+    if (a1 == 1 && (dwAltTabSettings == 3 || dwAltTabSettings == 2)) 
     {
         return 0;
     }
+    // if IsSnapAssist and SnapAssistSettings == Windows 10
+    else if (a1 == 4 && dwSnapAssistSettings == 3)
+    {
+        return 0;
+    }
+    // else, show Windows 11 style basically
     else
     {
         return twinui_pcshell_IsUndockedAssetAvailableFunc(a1, a2, a3, a4);

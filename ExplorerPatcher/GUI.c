@@ -136,6 +136,11 @@ LSTATUS GUI_RegSetValueExW(
         SHAppBarMessage(ABM_SETSTATE, &abd);
         return ERROR_SUCCESS;
     }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_PeopleBand"))
+    {
+        PostMessageW(FindWindowW(L"Shell_TrayWnd", NULL), WM_COMMAND, 435, 0);
+        return ERROR_SUCCESS;
+    }
 }
 
 LSTATUS GUI_RegQueryValueExW(
@@ -213,6 +218,10 @@ LSTATUS GUI_RegQueryValueExW(
         abd.cbSize = sizeof(APPBARDATA);
         *(DWORD*)lpData = (SHAppBarMessage(ABM_GETSTATE, &abd) == ABS_AUTOHIDE);
         return ERROR_SUCCESS;
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_PeopleBand"))
+    {
+        return RegQueryValueExW(hKey, L"PeopleBand", lpReserved, lpType, lpData, lpcbData);
     }
 }
 
@@ -774,7 +783,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 {
                                     WCHAR wszPath[MAX_PATH];
                                     ZeroMemory(wszPath, MAX_PATH * sizeof(WCHAR));
-                                    INT64 res = -1;
+                                    PDWORD_PTR res = -1;
                                     if (!SendMessageTimeoutW(hShellTrayWnd, 1460, 0, 0, SMTO_ABORTIFHUNG, 2000, &res) && res)
                                     {
                                         HANDLE hExplorerRestartThread = CreateThread(NULL, 0, BeginExplorerRestart, NULL, 0, NULL);
