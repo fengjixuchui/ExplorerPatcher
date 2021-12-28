@@ -8,7 +8,8 @@ const char* twinui_pcshell_SN[TWINUI_PCSHELL_SB_CNT] = {
     TWINUI_PCSHELL_SB_4,
     TWINUI_PCSHELL_SB_5,
     TWINUI_PCSHELL_SB_6,
-    TWINUI_PCSHELL_SB_7
+    TWINUI_PCSHELL_SB_7,
+    TWINUI_PCSHELL_SB_8
 };
 const char* startdocked_SN[STARTDOCKED_SB_CNT] = {
     STARTDOCKED_SB_0,
@@ -400,7 +401,7 @@ DWORD DownloadSymbols(DownloadSymbolsParams* params)
     }
     RegCreateKeyExW(
         HKEY_CURRENT_USER,
-        TEXT(REGPATH) L"\\" TEXT(STARTDOCKED_SB_NAME),
+        TEXT(REGPATH_STARTMENU) L"\\" TEXT(STARTDOCKED_SB_NAME),
         0,
         NULL,
         REG_OPTION_NON_VOLATILE,
@@ -610,7 +611,7 @@ BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule)
         symbols_PTRS->twinui_pcshell_PTRS[8] = 0x52980;
         bIsTwinuiPcshellHardcoded = TRUE;
     }
-    else if (!_stricmp(hash, "03487ccd5bc5a194fad61b616b0a2b28") || !_stricmp(hash, "3f6ef12a59a2f84a3296771ea7753e01")) // 346, 348
+    else if (!_stricmp(hash, "03487ccd5bc5a194fad61b616b0a2b28") || !_stricmp(hash, "3f6ef12a59a2f84a3296771ea7753e01")) // 346, 348, 376
     {
         symbols_PTRS->twinui_pcshell_PTRS[0] = 0x21B036;
         symbols_PTRS->twinui_pcshell_PTRS[1] = 0x5CD740;
@@ -640,7 +641,7 @@ BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule)
         symbols_PTRS->startdocked_PTRS[4] = 0x160AEC;
         bIsStartHardcoded = TRUE;
     }
-    else if (!_stricmp(hash, "e9c1c45a659dafabf671cb0ae195f8d9") || !_stricmp(hash, "7e652d78661ba62e33d41ad1d3180344")) // 346, 348
+    else if (!_stricmp(hash, "e9c1c45a659dafabf671cb0ae195f8d9") || !_stricmp(hash, "7e652d78661ba62e33d41ad1d3180344")) // 346, 348, 376
     {
         symbols_PTRS->startdocked_PTRS[0] = 0x18969C;
         symbols_PTRS->startdocked_PTRS[1] = 0x18969C;
@@ -655,7 +656,7 @@ BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule)
 
         RegCreateKeyExW(
             HKEY_CURRENT_USER,
-            TEXT(REGPATH) L"\\" TEXT(STARTDOCKED_SB_NAME),
+            TEXT(REGPATH_STARTMENU) L"\\" TEXT(STARTDOCKED_SB_NAME),
             0,
             NULL,
             REG_OPTION_NON_VOLATILE,
@@ -799,7 +800,7 @@ BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule)
 
         RegCreateKeyExW(
             HKEY_CURRENT_USER,
-            TEXT(REGPATH) L"\\" TEXT(STARTDOCKED_SB_NAME),
+            TEXT(REGPATH_STARTMENU) L"\\" TEXT(STARTDOCKED_SB_NAME),
             0,
             NULL,
             REG_OPTION_NON_VOLATILE,

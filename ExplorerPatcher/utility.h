@@ -10,6 +10,7 @@
 #include <accctrl.h>
 #include <aclapi.h>
 #include <sddl.h>
+#include <Shobjidl.h>
 #include <Shlobj_core.h>
 #include <restartmanager.h>
 #pragma comment(lib, "Rstrtmgr.lib")
@@ -19,7 +20,9 @@
 #pragma comment(lib, "Psapi.lib")
 
 #define APPID L"Microsoft.Windows.Explorer"
-#define REGPATH "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ExplorerPatcher"
+#define REGPATH "SOFTWARE\\ExplorerPatcher"
+#define REGPATH_OLD "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ExplorerPatcher"
+#define REGPATH_STARTMENU REGPATH_OLD
 #define SPECIAL_FOLDER CSIDL_PROGRAM_FILES
 #define SPECIAL_FOLDER_LEGACY CSIDL_APPDATA
 #define PRODUCT_NAME "ExplorerPatcher"
@@ -55,6 +58,12 @@ DEFINE_GUID(CLSID_ImmersiveShell,
     0xc2f03a33,
     0x21f5, 0x47fa, 0xb4, 0xbb,
     0x15, 0x63, 0x62, 0xa2, 0xf2, 0x39
+);
+
+DEFINE_GUID(IID_OpenControlPanel,
+    0xD11AD862,
+    0x66De, 0x4DF4, 0xBf, 0x6C,
+    0x1F, 0x56, 0x21, 0x99, 0x6A, 0xF1
 );
 
 typedef struct _StuckRectsData
@@ -465,5 +474,51 @@ inline BOOL IncrementDLLReferenceCount(HINSTANCE hinst)
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
         hinst,
         &hMod);
+}
+
+inline BOOL WINAPI PatchContextMenuOfNewMicrosoftIME(BOOL* bFound)
+{
+    // huge thanks to @Simplestas: https://github.com/valinet/ExplorerPatcher/issues/598
+    if (bFound) *bFound = FALSE;
+    const DWORD patch_from = 0x50653844, patch_to = 0x54653844; // cmp byte ptr [rbp+50h], r12b
+    HMODULE hInputSwitch = NULL;
+    if (!GetModuleHandleExW(0, L"InputSwitch.dll", &hInputSwitch))
+    {
+        return FALSE;
+    }
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hInputSwitch;
+    PIMAGE_NT_HEADERS pNTHeader = (PIMAGE_NT_HEADERS)((DWORD_PTR)dosHeader + dosHeader->e_lfanew);
+    PIMAGE_SECTION_HEADER pSectionHeader = (PIMAGE_SECTION_HEADER)(pNTHeader + 1);
+    char* mod = 0;
+    int i;
+    for (i = 0; i < pNTHeader->FileHeader.NumberOfSections; i++)
+    {
+        //if (strcmp((char*)pSectionHeader[i].Name, ".text") == 0)
+        if ((pSectionHeader[i].Characteristics & IMAGE_SCN_CNT_CODE) && pSectionHeader[i].SizeOfRawData)
+        {
+            mod = (char*)dosHeader + pSectionHeader[i].VirtualAddress;
+            break;
+        }
+    }
+    if (!mod)
+    {
+        return FALSE;
+    }
+    for (size_t off = 0; off < pSectionHeader[i].Misc.VirtualSize - sizeof(DWORD); ++off)
+    {
+        DWORD* ptr = (DWORD*)(mod + off);
+        if (*ptr == patch_from)
+        {
+            if (bFound) *bFound = TRUE;
+            DWORD prot;
+            if (VirtualProtect(ptr, sizeof(DWORD), PAGE_EXECUTE_READWRITE, &prot))
+            {
+                *ptr = patch_to;
+                VirtualProtect(ptr, sizeof(DWORD), prot, &prot);
+            }
+            break;
+        }
+    }
+    return TRUE;
 }
 #endif
