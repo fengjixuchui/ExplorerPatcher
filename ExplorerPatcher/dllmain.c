@@ -93,6 +93,7 @@ HANDLE hWin11AltTabInitialized = NULL;
 BYTE* lpShouldDisplayCCButton = NULL;
 HMONITOR hMonitorList[30];
 DWORD dwMonitorCount = 0;
+HANDLE hCanStartSws = NULL;
 int Code = 0;
 HRESULT InjectStartFromExplorer();
 void InvokeClockFlyout();
@@ -1388,6 +1389,7 @@ DWORD FixTaskbarAutohide(DWORD unused)
             SHAppBarMessage(ABM_SETSTATE, &abd);
         }
     }
+    SetEvent(hCanStartSws);
 }
 #endif
 #pragma endregion
@@ -3581,6 +3583,7 @@ DWORD SignalShellReady(DWORD wait)
         printf(">>> Signal shell ready.\n");
         SetEvent(hEvent);
     }
+    SetEvent(hCanStartSws);
 
     printf("Ended \"Signal shell ready\" thread.\n");
     return 0;
@@ -3787,11 +3790,12 @@ void sws_ReadSettings(sws_WindowSwitcher* sws)
 
 DWORD WindowSwitcher(DWORD unused)
 {
+    WaitForSingleObject(hCanStartSws, INFINITE);
     if (!bOldTaskbar)
     {
         WaitForSingleObject(hWin11AltTabInitialized, INFINITE);
-        Sleep(1000);
     }
+    Sleep(1000);
 
     while (TRUE)
     {
@@ -3979,6 +3983,43 @@ void WINAPI LoadSettings(LPARAM lParam)
                         sizeof(DWORD)
                     );
                     RegDeleteKeyExW(hKey, TEXT(STARTDOCKED_SB_NAME), KEY_WOW64_64KEY, 0);
+                    DWORD dwTaskbarGlomLevel = 0, dwMMTaskbarGlomLevel = 0;
+                    dwSize = sizeof(DWORD);
+                    RegGetValueW(
+                        HKEY_CURRENT_USER,
+                        L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                        L"TaskbarGlomLevel",
+                        REG_DWORD,
+                        NULL,
+                        &dwTaskbarGlomLevel,
+                        &dwSize
+                    );
+                    RegSetValueExW(
+                        hKey,
+                        TEXT("TaskbarGlomLevel"),
+                        0,
+                        REG_DWORD,
+                        &dwTaskbarGlomLevel,
+                        sizeof(DWORD)
+                    );
+                    dwSize = sizeof(DWORD);
+                    RegGetValueW(
+                        HKEY_CURRENT_USER,
+                        L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                        L"MMTaskbarGlomLevel",
+                        REG_DWORD,
+                        NULL,
+                        &dwMMTaskbarGlomLevel,
+                        &dwSize
+                    );
+                    RegSetValueExW(
+                        hKey,
+                        TEXT("MMTaskbarGlomLevel"),
+                        0,
+                        REG_DWORD,
+                        &dwMMTaskbarGlomLevel,
+                        sizeof(DWORD)
+                    );
                 }
             }
             dwTemp = TRUE;
@@ -6323,18 +6364,16 @@ DWORD Inject(BOOL bIsExplorer)
     }
 
 #ifdef _WIN64
-    if (bIsExplorer)
-    {
-        hWin11AltTabInitialized = CreateEventW(NULL, FALSE, FALSE, NULL);
-        CreateThread(
-            0,
-            0,
-            WindowSwitcher,
-            0,
-            0,
-            0
-        );
-    }
+    hCanStartSws = CreateEventW(NULL, FALSE, FALSE, NULL);
+    hWin11AltTabInitialized = CreateEventW(NULL, FALSE, FALSE, NULL);
+    CreateThread(
+        0,
+        0,
+        WindowSwitcher,
+        0,
+        0,
+        0
+    );
 
 
 #ifdef USE_PRIVATE_INTERFACES
