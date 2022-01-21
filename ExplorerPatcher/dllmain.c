@@ -47,6 +47,7 @@ BOOL bIsExplorerProcess = FALSE;
 BOOL bInstanced = FALSE;
 HWND archivehWnd;
 DWORD bOldTaskbar = TRUE;
+DWORD bWasOldTaskbarSet = FALSE;
 DWORD bAllocConsole = FALSE;
 DWORD bHideExplorerSearchBar = FALSE;
 DWORD bMicaEffectOnTitlebar = FALSE;
@@ -63,6 +64,7 @@ DWORD bOpenAtLogon = FALSE;
 DWORD bClockFlyoutOnWinC = FALSE;
 DWORD bDisableImmersiveContextMenu = FALSE;
 DWORD bClassicThemeMitigations = FALSE;
+DWORD bWasClassicThemeMitigationsSet = FALSE;
 DWORD bHookStartMenu = TRUE;
 DWORD bPropertiesInWinX = FALSE;
 DWORD bNoMenuAccelerator = FALSE;
@@ -79,6 +81,7 @@ BOOL bDoNotRedirectSystemToSettingsApp = FALSE;
 BOOL bDoNotRedirectProgramsAndFeaturesToSettingsApp = FALSE;
 BOOL bDoNotRedirectDateAndTimeToSettingsApp = FALSE;
 BOOL bDoNotRedirectNotificationIconsToSettingsApp = FALSE;
+BOOL bDisableOfficeHotkeys = FALSE;
 #define TASKBARGLOMLEVEL_DEFAULT 2
 #define MMTASKBARGLOMLEVEL_DEFAULT 2
 DWORD dwTaskbarGlomLevel = TASKBARGLOMLEVEL_DEFAULT;
@@ -91,7 +94,8 @@ HANDLE hSwsSettingsChanged = NULL;
 HANDLE hSwsOpacityMaybeChanged = NULL;
 HANDLE hWin11AltTabInitialized = NULL;
 BYTE* lpShouldDisplayCCButton = NULL;
-HMONITOR hMonitorList[30];
+#define MAX_NUM_MONITORS 30
+HMONITOR hMonitorList[MAX_NUM_MONITORS];
 DWORD dwMonitorCount = 0;
 HANDLE hCanStartSws = NULL;
 int Code = 0;
@@ -101,7 +105,12 @@ void WINAPI Explorer_RefreshUI(int unused);
 
 #define ORB_STYLE_WINDOWS10 0
 #define ORB_STYLE_WINDOWS11 1
-#define ORB_WINDOWS11_SEPARATOR 1
+#define ORB_STYLE_TRANSPARENT 2
+typedef struct _OrbInfo
+{
+    HTHEME hTheme;
+    UINT dpi;
+} OrbInfo;
 
 void* P_Icon_Light_Search = NULL;
 DWORD S_Icon_Light_Search = 0;
@@ -1447,7 +1456,7 @@ HMENU explorer_LoadMenuW(HINSTANCE hInstance, LPCWSTR lpMenuName)
 
 HHOOK Shell_TrayWndMouseHook = NULL;
 
-BOOL Shell_TrayWnd_IsTaskbarRightClick(POINT pt)
+BOOL IsPointOnEmptyAreaOfNewTaskbar(POINT pt)
 {
     HRESULT hr = S_OK;
     IUIAutomation2* pIUIAutomation2 = NULL;
@@ -1559,13 +1568,19 @@ BOOL Shell_TrayWnd_IsTaskbarRightClick(POINT pt)
     return bRet;
 }
 
+long long TaskbarLeftClickTime = 0;
+BOOL bTaskbarLeftClickEven = FALSE;
 LRESULT CALLBACK Shell_TrayWndMouseProc(
     _In_ int    nCode,
     _In_ WPARAM wParam,
     _In_ LPARAM lParam
 )
 {
-    if (nCode == HC_ACTION && wParam == WM_RBUTTONUP && Shell_TrayWnd_IsTaskbarRightClick(((MOUSEHOOKSTRUCT*)lParam)->pt))
+    if (!bOldTaskbar && 
+        nCode == HC_ACTION && 
+        wParam == WM_RBUTTONUP && 
+        IsPointOnEmptyAreaOfNewTaskbar(((MOUSEHOOKSTRUCT*)lParam)->pt)
+        )
     {
         PostMessageW(
             FindWindowW(L"Shell_TrayWnd", NULL),
@@ -1574,6 +1589,46 @@ LRESULT CALLBACK Shell_TrayWndMouseProc(
             MAKELPARAM(((MOUSEHOOKSTRUCT*)lParam)->pt.x, ((MOUSEHOOKSTRUCT*)lParam)->pt.y)
         );
         return 1;
+    }
+    if (!bOldTaskbar &&
+        bTaskbarAutohideOnDoubleClick && 
+        nCode == HC_ACTION && 
+        wParam == WM_LBUTTONUP &&
+        IsPointOnEmptyAreaOfNewTaskbar(((MOUSEHOOKSTRUCT*)lParam)->pt)
+        )
+    {
+        /*BOOL bShouldCheck = FALSE;
+        if (bOldTaskbar)
+        {
+            WCHAR cn[200];
+            GetClassNameW(((MOUSEHOOKSTRUCT*)lParam)->hwnd, cn, 200);
+            wprintf(L"%s\n", cn);
+            bShouldCheck = !wcscmp(cn, L"Shell_SecondaryTrayWnd"); // !wcscmp(cn, L"Shell_TrayWnd")
+        }
+        else
+        {
+            bShouldCheck = IsPointOnEmptyAreaOfNewTaskbar(((MOUSEHOOKSTRUCT*)lParam)->pt);
+        }
+        if (bShouldCheck)
+        {*/
+            if (bTaskbarLeftClickEven)
+            {
+                if (TaskbarLeftClickTime != 0)
+                {
+                    TaskbarLeftClickTime = milliseconds_now() - TaskbarLeftClickTime;
+                }
+                if (TaskbarLeftClickTime != 0 && TaskbarLeftClickTime < GetDoubleClickTime())
+                {
+                    TaskbarLeftClickTime = 0;
+                    ToggleTaskbarAutohide();
+                }
+                else
+                {
+                    TaskbarLeftClickTime = milliseconds_now();
+                }
+            }
+            bTaskbarLeftClickEven = !bTaskbarLeftClickEven;
+        //}
     }
     return CallNextHookEx(Shell_TrayWndMouseHook, nCode, wParam, lParam);
 }
@@ -1589,7 +1644,11 @@ INT64 Shell_TrayWndSubclassProc(
 {
     if (uMsg == WM_NCDESTROY)
     {
-        UnregisterHotKey(hWnd, 'VNEP');
+        if (bIsPrimaryTaskbar)
+        {
+            UnhookWindowsHookEx(Shell_TrayWndMouseHook);
+            UnregisterHotKey(hWnd, 'VNEP');
+        }
         RemoveWindowSubclass(hWnd, Shell_TrayWndSubclassProc, Shell_TrayWndSubclassProc);
     }
     else if (!bIsPrimaryTaskbar && uMsg == WM_CONTEXTMENU)
@@ -1600,25 +1659,15 @@ INT64 Shell_TrayWndSubclassProc(
         // the right menu
         return 0;
     }
-    else if (!bIsPrimaryTaskbar && uMsg == WM_SETCURSOR)
+    else if (!bOldTaskbar && !bIsPrimaryTaskbar && uMsg == WM_SETCURSOR)
     {
         // Received when mouse is over taskbar edge and autohide is on
         PostMessageW(hWnd, WM_ACTIVATE, WA_ACTIVE, NULL);
     }
-    else if (uMsg == WM_LBUTTONDBLCLK && bTaskbarAutohideOnDoubleClick)
+    else if (bOldTaskbar && uMsg == WM_LBUTTONDBLCLK && bTaskbarAutohideOnDoubleClick)
     {
-        APPBARDATA abd;
-        abd.cbSize = sizeof(APPBARDATA);
-        if (SHAppBarMessage(ABM_GETSTATE, &abd) == ABS_AUTOHIDE)
-        {
-            abd.lParam = 0;
-            SHAppBarMessage(ABM_SETSTATE, &abd);
-        }
-        else
-        {
-            abd.lParam = ABS_AUTOHIDE;
-            SHAppBarMessage(ABM_SETSTATE, &abd);
-        }
+        ToggleTaskbarAutohide();
+        return 0;
     }
     else if (uMsg == WM_HOTKEY && lParam == MAKELPARAM(MOD_WIN | MOD_ALT, 0x44))
     {
@@ -1644,11 +1693,11 @@ INT64 Shell_TrayWndSubclassProc(
     {
         UpdateStartMenuPositioning(MAKELPARAM(TRUE, FALSE));
     }
-    else if (!bOldTaskbar && uMsg == WM_PARENTNOTIFY && wParam == WM_RBUTTONDOWN && !Shell_TrayWndMouseHook) // && !IsUndockingDisabled
-    {
-        DWORD dwThreadId = GetCurrentThreadId();
-        Shell_TrayWndMouseHook = SetWindowsHookExW(WH_MOUSE, Shell_TrayWndMouseProc, NULL, dwThreadId);
-    }
+    //else if (!bOldTaskbar && uMsg == WM_PARENTNOTIFY && wParam == WM_RBUTTONDOWN && !Shell_TrayWndMouseHook) // && !IsUndockingDisabled
+    //{
+    //    DWORD dwThreadId = GetCurrentThreadId();
+    //    Shell_TrayWndMouseHook = SetWindowsHookExW(WH_MOUSE, Shell_TrayWndMouseProc, NULL, dwThreadId);
+    //}
     else if (uMsg == RegisterWindowMessageW(L"Windows11ContextMenu_" _T(EP_CLSID)))
     {
         POINT pt;
@@ -3777,6 +3826,24 @@ void sws_ReadSettings(sws_WindowSwitcher* sws)
                 &(sws->dwMasterPadding),
                 &dwSize
             );
+            dwSize = sizeof(DWORD);
+            RegQueryValueExW(
+                hKey,
+                TEXT("SwitcherIsPerApplication"),
+                0,
+                NULL,
+                &(sws->bSwitcherIsPerApplication),
+                &dwSize
+            );
+            dwSize = sizeof(DWORD);
+            RegQueryValueExW(
+                hKey,
+                TEXT("AlwaysUseWindowTitleAndIcon"),
+                0,
+                NULL,
+                &(sws->bAlwaysUseWindowTitleAndIcon),
+                &dwSize
+            );
             if (sws->bIsInitialized)
             {
                 sws_WindowSwitcher_UnregisterHotkeys(sws);
@@ -3891,11 +3958,14 @@ DWORD WindowSwitcher(DWORD unused)
 
 
 #pragma region "Load Settings from registry"
+#define REFRESHUI_NONE 0b00
+#define REFRESHUI_GLOM 0b01
+#define REFRESHUI_ORB 0b10
 void WINAPI LoadSettings(LPARAM lParam)
 {
     BOOL bIsExplorer = LOWORD(lParam);
     BOOL bIsRefreshAllowed = HIWORD(lParam);
-    BOOL bShouldRefreshUI = FALSE;
+    DWORD dwRefreshUIMask = REFRESHUI_NONE;
 
     HKEY hKey = NULL;
     DWORD dwSize = 0, dwTemp = 0;
@@ -4064,6 +4134,13 @@ void WINAPI LoadSettings(LPARAM lParam)
             _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDOUT);
             _CrtDumpMemoryLeaks();
             printf("[Memcheck] Memory leak dump complete.\n");
+            printf(
+                "[Memcheck] Objects in use:\nGDI\tGDIp\tUSER\tUSERp\n%d\t%d\t%d\t%d\n",
+                GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS),
+                GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS_PEAK),
+                GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS),
+                GetGuiResources(GetCurrentProcess(), GR_USEROBJECTS_PEAK)
+            );
 #endif
             dwTemp = 0;
             RegSetValueExW(
@@ -4093,15 +4170,21 @@ void WINAPI LoadSettings(LPARAM lParam)
             &bDisableImmersiveContextMenu,
             &dwSize
         );
+        dwTemp = FALSE;
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
             TEXT("ClassicThemeMitigations"),
             0,
             NULL,
-            &bClassicThemeMitigations,
+            &dwTemp,
             &dwSize
         );
+        if (!bWasClassicThemeMitigationsSet)
+        {
+            bClassicThemeMitigations = dwTemp;
+            bWasClassicThemeMitigationsSet = TRUE;
+        }
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
@@ -4152,15 +4235,21 @@ void WINAPI LoadSettings(LPARAM lParam)
             RegCloseKey(hKey);
             return;
         }
+        dwTemp = TRUE;
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
             TEXT("OldTaskbar"),
             0,
             NULL,
-            &bOldTaskbar,
+            &dwTemp,
             &dwSize
         );
+        if (!bWasOldTaskbarSet)
+        {
+            bOldTaskbar = dwTemp;
+            bWasOldTaskbarSet = TRUE;
+        }
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
@@ -4323,15 +4412,21 @@ void WINAPI LoadSettings(LPARAM lParam)
             &bTaskbarAutohideOnDoubleClick,
             &dwSize
         );
+        dwTemp = ORB_STYLE_WINDOWS10;
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
             TEXT("OrbStyle"),
             0,
             NULL,
-            &dwOrbStyle,
+            &dwTemp,
             &dwSize
         );
+        if (bOldTaskbar && (dwTemp != dwOrbStyle))
+        {
+            dwOrbStyle = dwTemp;
+            dwRefreshUIMask |= REFRESHUI_ORB;
+        }
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
@@ -4384,6 +4479,15 @@ void WINAPI LoadSettings(LPARAM lParam)
             &bDoNotRedirectNotificationIconsToSettingsApp,
             &dwSize
         );
+        dwSize = sizeof(DWORD);
+        RegQueryValueExW(
+            hKey,
+            TEXT("DisableOfficeHotkeys"),
+            0,
+            NULL,
+            &bDisableOfficeHotkeys,
+            &dwSize
+        );
         dwTemp = TASKBARGLOMLEVEL_DEFAULT;
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
@@ -4394,9 +4498,9 @@ void WINAPI LoadSettings(LPARAM lParam)
             &dwTemp,
             &dwSize
         );
-        if (dwTemp != dwTaskbarGlomLevel)
+        if (bOldTaskbar && (dwTemp != dwTaskbarGlomLevel))
         {
-            bShouldRefreshUI = TRUE;
+            dwRefreshUIMask = REFRESHUI_GLOM;
         }
         dwTaskbarGlomLevel = dwTemp;
         dwTemp = MMTASKBARGLOMLEVEL_DEFAULT;
@@ -4409,9 +4513,9 @@ void WINAPI LoadSettings(LPARAM lParam)
             &dwTemp,
             &dwSize
         );
-        if (dwTemp != dwMMTaskbarGlomLevel)
+        if (bOldTaskbar && (dwTemp != dwMMTaskbarGlomLevel))
         {
-            bShouldRefreshUI = TRUE;
+            dwRefreshUIMask = REFRESHUI_GLOM;
         }
         dwMMTaskbarGlomLevel = dwTemp;
         RegCloseKey(hKey);
@@ -4605,9 +4709,20 @@ void WINAPI LoadSettings(LPARAM lParam)
         RegCloseKey(hKey);
     }
 
-    if (bIsRefreshAllowed && bShouldRefreshUI)
+    if (bIsRefreshAllowed && dwRefreshUIMask)
     {
-        Explorer_RefreshUI(0);
+        if (dwRefreshUIMask & REFRESHUI_GLOM)
+        {
+            Explorer_RefreshUI(0);
+        }
+        if (dwRefreshUIMask & REFRESHUI_ORB)
+        {
+#ifdef _WIN64
+            ToggleTaskbarAutohide();
+            ToggleTaskbarAutohide();
+#endif
+            InvalidateRect(FindWindowW(L"ExplorerPatcher_GUI_" _T(EP_CLSID), NULL), NULL, FALSE);
+        }
     }
 }
 
@@ -4780,6 +4895,7 @@ HWND CreateWindowExWHook(
     {
         SetWindowSubclass(hWnd, Shell_TrayWndSubclassProc, Shell_TrayWndSubclassProc, TRUE);
         RegisterHotKey(hWnd, 'VNEP', MOD_WIN | MOD_ALT, 0x44);
+        Shell_TrayWndMouseHook = SetWindowsHookExW(WH_MOUSE, Shell_TrayWndMouseProc, NULL, GetCurrentThreadId());
     }
     else if (bIsExplorerProcess && (*((WORD*)&(lpClassName)+1)) && !wcscmp(lpClassName, L"Shell_SecondaryTrayWnd"))
     {
@@ -4880,7 +4996,16 @@ HRESULT explorer_SetWindowThemeHook(
     return explorer_SetWindowThemeFunc(hwnd, pszSubAppName, pszSubIdList);
 }
 
-HTHEME hStartOrbTheme = NULL;
+INT64 explorer_SetWindowCompositionAttribute(HWND hWnd, WINCOMPATTRDATA* data)
+{
+    if (bClassicThemeMitigations)
+    {
+        return TRUE;
+    }
+    return SetWindowCompositionAttribute(hWnd, data);
+}
+
+HDPA hOrbCollection = NULL;
 HRESULT explorer_DrawThemeBackground(
     HTHEME  hTheme,
     HDC     hdc,
@@ -4890,42 +5015,67 @@ HRESULT explorer_DrawThemeBackground(
     LPCRECT pClipRect
 )
 {
-    if (dwOrbStyle == ORB_STYLE_WINDOWS11 && hStartOrbTheme == hTheme)
+    if (dwOrbStyle && hOrbCollection)
     {
-        BITMAPINFO bi;
-        ZeroMemory(&bi, sizeof(BITMAPINFO));
-        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bi.bmiHeader.biWidth = 1;
-        bi.bmiHeader.biHeight = 1;
-        bi.bmiHeader.biPlanes = 1;
-        bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB;
-        RGBQUAD transparent = { 0, 0, 0, 0 };
-        RGBQUAD color = { 0xFF, 0xFF, 0xFF, 0xFF };
+        for (unsigned int i = 0; i < DPA_GetPtrCount(hOrbCollection); ++i)
+        {
+            OrbInfo* oi = DPA_FastGetPtr(hOrbCollection, i);
+            if (oi->hTheme == hTheme)
+            {
+                BITMAPINFO bi;
+                ZeroMemory(&bi, sizeof(BITMAPINFO));
+                bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                bi.bmiHeader.biWidth = 1;
+                bi.bmiHeader.biHeight = 1;
+                bi.bmiHeader.biPlanes = 1;
+                bi.bmiHeader.biBitCount = 32;
+                bi.bmiHeader.biCompression = BI_RGB;
+                RGBQUAD transparent = { 0, 0, 0, 0 };
+                RGBQUAD color = { 0xFF, 0xFF, 0xFF, 0xFF };
 
-        StretchDIBits(hdc,
-            pRect->left,
-            pRect->top,
-            pRect->right - pRect->left,
-            pRect->bottom - pRect->top,
-            0, 0, 1, 1, &color, &bi,
-            DIB_RGB_COLORS, SRCCOPY);
-        StretchDIBits(hdc, 
-            pRect->left + ((pRect->right - pRect->left) / 2) - ORB_WINDOWS11_SEPARATOR / 2, 
-            pRect->top,
-            ORB_WINDOWS11_SEPARATOR,
-            pRect->bottom - pRect->top,
-            0, 0, 1, 1, &transparent, &bi,
-            DIB_RGB_COLORS, SRCCOPY);
-        StretchDIBits(hdc,
-            pRect->left,
-            pRect->top + ((pRect->bottom - pRect->top) / 2) - ORB_WINDOWS11_SEPARATOR / 2,
-            pRect->right - pRect->left,
-            ORB_WINDOWS11_SEPARATOR,
-            0, 0, 1, 1, &transparent, &bi,
-            DIB_RGB_COLORS, SRCCOPY);
+                if (dwOrbStyle == ORB_STYLE_WINDOWS11)
+                {
+                    UINT separator = oi->dpi / 96;
+                    //printf(">>> SEPARATOR %p %d %d\n", oi->hTheme, oi->dpi, separator);
 
-        return S_OK;
+                    // Background
+                    StretchDIBits(hdc,
+                        pRect->left + (separator % 2),
+                        pRect->top + (separator % 2),
+                        pRect->right - pRect->left - (separator % 2),
+                        pRect->bottom - pRect->top - (separator % 2),
+                        0, 0, 1, 1, &color, &bi,
+                        DIB_RGB_COLORS, SRCCOPY);
+                    // Middle vertical line
+                    StretchDIBits(hdc,
+                        pRect->left + ((pRect->right - pRect->left) / 2) - (separator / 2),
+                        pRect->top,
+                        separator,
+                        pRect->bottom - pRect->top,
+                        0, 0, 1, 1, &transparent, &bi,
+                        DIB_RGB_COLORS, SRCCOPY);
+                    // Middle horizontal line
+                    StretchDIBits(hdc,
+                        pRect->left,
+                        pRect->top + ((pRect->bottom - pRect->top) / 2) - (separator / 2),
+                        pRect->right - pRect->left,
+                        separator,
+                        0, 0, 1, 1, &transparent, &bi,
+                        DIB_RGB_COLORS, SRCCOPY);
+                }
+                else if (dwOrbStyle == ORB_STYLE_TRANSPARENT)
+                {
+                    StretchDIBits(hdc,
+                        pRect->left,
+                        pRect->top,
+                        pRect->right - pRect->left,
+                        pRect->bottom - pRect->top,
+                        0, 0, 1, 1, &transparent, &bi,
+                        DIB_RGB_COLORS, SRCCOPY);
+                }
+                return S_OK;
+            }
+        }
     }
     if (bClassicThemeMitigations)
     {
@@ -4974,13 +5124,24 @@ HRESULT explorer_DrawThemeBackground(
     return DrawThemeBackground(hTheme, hdc, iPartId, iStateId, pRect, pClipRect);
 }
 
-INT64 explorer_SetWindowCompositionAttribute(HWND hWnd, WINCOMPATTRDATA* data)
+HRESULT explorer_CloseThemeData(HTHEME hTheme)
 {
-    if (bClassicThemeMitigations)
+    HRESULT hr = CloseThemeData(hTheme);
+    if (SUCCEEDED(hr) && hOrbCollection)
     {
-        return TRUE;
+        for (unsigned int i = 0; i < DPA_GetPtrCount(hOrbCollection); ++i)
+        {
+            OrbInfo* oi = DPA_FastGetPtr(hOrbCollection, i);
+            if (oi->hTheme == hTheme)
+            {
+                //printf(">>> DELETE DPA %p %d\n", oi->hTheme, oi->dpi);
+                DPA_DeletePtr(hOrbCollection, i);
+                free(oi);
+                break;
+            }
+        }
     }
-    return SetWindowCompositionAttribute(hWnd, data);
+    return hr;
 }
 
 HTHEME explorer_OpenThemeDataForDpi(
@@ -4989,12 +5150,24 @@ HTHEME explorer_OpenThemeDataForDpi(
     UINT    dpi
 )
 {
-    if (dwOrbStyle == ORB_STYLE_WINDOWS11 && (*((WORD*)&(pszClassList)+1)) && !wcscmp(pszClassList, L"TaskbarPearl"))
+    if ((*((WORD*)&(pszClassList)+1)) && !wcscmp(pszClassList, L"TaskbarPearl"))
     {
-        HTHEME hTheme = OpenThemeDataForDpi(hwnd, pszClassList, dpi);
-        if (hTheme)
+        if (!hOrbCollection)
         {
-            hStartOrbTheme = hTheme;
+            hOrbCollection = DPA_Create(MAX_NUM_MONITORS);
+        }
+
+        HTHEME hTheme = OpenThemeDataForDpi(hwnd, pszClassList, dpi);
+        if (hTheme && hOrbCollection)
+        {
+            OrbInfo* oi = malloc(sizeof(OrbInfo));
+            if (oi)
+            {
+                oi->hTheme = hTheme;
+                oi->dpi = dpi;
+                //printf(">>> APPEND DPA %p %d\n", oi->hTheme, oi->dpi);
+                DPA_AppendPtr(hOrbCollection, oi);
+            }
         }
         return hTheme;
     }
@@ -5491,6 +5664,7 @@ HINSTANCE explorer_ShellExecuteW(
 
 
 #pragma region "Change language UI style"
+#ifdef _WIN64
 DEFINE_GUID(CLSID_InputSwitchControl,
     0xB9BC2A50,
     0x43C3, 0x41AA, 0xa0, 0x86,
@@ -5540,6 +5714,15 @@ typedef struct IInputSwitchControlVtbl
         IInputSwitchControl* This,
         /* [in] */ void* pInputSwitchCallback);
 
+    HRESULT(STDMETHODCALLTYPE* ShowInputSwitch)(
+        IInputSwitchControl* This,
+        /* [in] */ RECT* lpRect);
+
+    HRESULT(STDMETHODCALLTYPE* GetProfileCount)(
+        IInputSwitchControl* This,
+        /* [in] */ unsigned int* pOutNumberOfProfiles,
+        /* [in] */ int* a3);
+
     // ...
 
     END_INTERFACE
@@ -5550,10 +5733,81 @@ interface IInputSwitchControl
     CONST_VTBL struct IInputSwitchControlVtbl* lpVtbl;
 };
 
-HRESULT(*CInputSwitchControl_InitFunc)(IInputSwitchControl*, unsigned int, INT64);
-HRESULT CInputSwitchControl_InitHook(IInputSwitchControl* _this, unsigned int dwOriginalIMEStyle, INT64 a3)
+HRESULT(*CInputSwitchControl_InitFunc)(IInputSwitchControl*, unsigned int);
+HRESULT CInputSwitchControl_InitHook(IInputSwitchControl* _this, unsigned int dwOriginalIMEStyle)
 {
-    return CInputSwitchControl_InitFunc(_this, dwIMEStyle ? dwIMEStyle : dwOriginalIMEStyle, a3);
+    return CInputSwitchControl_InitFunc(_this, dwIMEStyle ? dwIMEStyle : dwOriginalIMEStyle);
+}
+
+HRESULT (*CInputSwitchControl_ShowInputSwitchFunc)(IInputSwitchControl*, RECT*);
+HRESULT CInputSwitchControl_ShowInputSwitchHook(IInputSwitchControl* _this, RECT* lpRect)
+{
+    if (!dwIMEStyle) // impossible case (this is not called for the Windows 11 language switcher), but just in case
+    {
+        return CInputSwitchControl_ShowInputSwitchFunc(_this, lpRect);
+    }
+
+    unsigned int dwNumberOfProfiles = 0;
+    int a3 = 0;
+    _this->lpVtbl->GetProfileCount(_this, &dwNumberOfProfiles, &a3);
+
+    HWND hWndTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+
+    UINT dpiX = 96, dpiY = 96;
+    HRESULT hr = GetDpiForMonitor(
+        MonitorFromWindow(hWndTaskbar, MONITOR_DEFAULTTOPRIMARY),
+        MDT_DEFAULT,
+        &dpiX,
+        &dpiY
+    );
+    double dpix = dpiX / 96.0;
+    double dpiy = dpiY / 96.0;
+
+    //printf("RECT %d %d %d %d - %d %d\n", lpRect->left, lpRect->right, lpRect->top, lpRect->bottom, dwNumberOfProfiles, a3);
+
+    RECT rc;
+    GetWindowRect(hWndTaskbar, &rc);
+    POINT pt;
+    pt.x = rc.left;
+    pt.y = rc.top;
+    UINT tbPos = GetTaskbarLocationAndSize(pt, &rc);
+    if (tbPos == TB_POS_BOTTOM)
+    {
+    }
+    else if (tbPos == TB_POS_TOP)
+    {
+        if (dwIMEStyle == 1) // Windows 10 (with Language preferences link)
+        {
+            lpRect->top = rc.top + (rc.bottom - rc.top) + (UINT)(((double)dwNumberOfProfiles * (60.0 * dpiy)) + (5.0 * dpiy * 4.0) + (dpiy) + (48.0 * dpiy));
+        }
+        else if (dwIMEStyle == 2 || dwIMEStyle == 3 || dwIMEStyle == 4 || dwIMEStyle == 5) // LOGONUI, UAC, Windows 10, OOBE
+        {
+            lpRect->top = rc.top + (rc.bottom - rc.top) + (UINT)(((double)dwNumberOfProfiles * (60.0 * dpiy)) + (5.0 * dpiy * 2.0));
+        }
+    }
+    else if (tbPos == TB_POS_LEFT)
+    {
+        if (dwIMEStyle == 1 || dwIMEStyle == 2 || dwIMEStyle == 3 || dwIMEStyle == 4 || dwIMEStyle == 5)
+        {
+            lpRect->right = rc.left + (rc.right - rc.left) + (UINT)((double)(300.0 * dpix));
+            lpRect->top += (lpRect->bottom - lpRect->top);
+        }
+    }
+    if (tbPos == TB_POS_RIGHT)
+    {
+        if (dwIMEStyle == 1 || dwIMEStyle == 2 || dwIMEStyle == 3 || dwIMEStyle == 4 || dwIMEStyle == 5)
+        {
+            lpRect->right = lpRect->right - (rc.right - rc.left);
+            lpRect->top += (lpRect->bottom - lpRect->top);
+        }
+    }
+
+    if (dwIMEStyle == 4)
+    {
+        lpRect->right -= (UINT)((double)(300.0 * dpix)) - (lpRect->right - lpRect->left);
+    }
+
+    return CInputSwitchControl_ShowInputSwitchFunc(_this, lpRect);
 }
 
 HRESULT explorer_CoCreateInstanceHook(
@@ -5577,6 +5831,8 @@ HRESULT explorer_CoCreateInstanceHook(
             DWORD flOldProtect = 0;
             if (VirtualProtect(pInputSwitchControl->lpVtbl, sizeof(IInputSwitchControlVtbl), PAGE_EXECUTE_READWRITE, &flOldProtect))
             {
+                CInputSwitchControl_ShowInputSwitchFunc = pInputSwitchControl->lpVtbl->ShowInputSwitch;
+                pInputSwitchControl->lpVtbl->ShowInputSwitch = CInputSwitchControl_ShowInputSwitchHook;
                 CInputSwitchControl_InitFunc = pInputSwitchControl->lpVtbl->Init;
                 pInputSwitchControl->lpVtbl->Init = CInputSwitchControl_InitHook;
                 VirtualProtect(pInputSwitchControl->lpVtbl, sizeof(IInputSwitchControlVtbl), flOldProtect, &flOldProtect);
@@ -5638,6 +5894,7 @@ HRESULT explorer_CoCreateInstanceHook(
     }
     return CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv);
 }
+#endif
 #pragma endregion
 
 
@@ -6020,6 +6277,31 @@ BOOL explorer_SetRect(LPRECT lprc, int xLeft, int yTop, int xRight, int yBottom)
     }
 
     return FALSE;
+}
+#pragma endregion
+
+
+#pragma region "Disable Office Hotkeys"
+const UINT office_hotkeys[10] = { 0x57, 0x54, 0x59, 0x4F, 0x50, 0x44, 0x4C, 0x58, 0x4E, 0x20 };
+BOOL explorer_RegisterHotkeyHook(HWND hWnd, int id, UINT fsModifiers, UINT vk)
+{
+    if (fsModifiers == (MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN | MOD_NOREPEAT) && (
+        vk == office_hotkeys[0] ||
+        vk == office_hotkeys[1] ||
+        vk == office_hotkeys[2] ||
+        vk == office_hotkeys[3] ||
+        vk == office_hotkeys[4] ||
+        vk == office_hotkeys[5] ||
+        vk == office_hotkeys[6] ||
+        vk == office_hotkeys[7] ||
+        vk == office_hotkeys[8] ||
+        vk == office_hotkeys[9] ||
+        !vk))
+    {
+        SetLastError(ERROR_HOTKEY_ALREADY_REGISTERED);
+        return FALSE;
+    }
+    return RegisterHotKey(hWnd, id, fsModifiers, vk);
 }
 #pragma endregion
 
@@ -6436,6 +6718,7 @@ DWORD Inject(BOOL bIsExplorer)
     VnPatchIAT(hExplorer, "user32.dll", "TrackPopupMenuEx", explorer_TrackPopupMenuExHook);
     VnPatchIAT(hExplorer, "uxtheme.dll", "OpenThemeDataForDpi", explorer_OpenThemeDataForDpi);
     VnPatchIAT(hExplorer, "uxtheme.dll", "DrawThemeBackground", explorer_DrawThemeBackground);
+    VnPatchIAT(hExplorer, "uxtheme.dll", "CloseThemeData", explorer_CloseThemeData);
     if (bClassicThemeMitigations)
     {
         /*explorer_SetWindowThemeFunc = SetWindowTheme;
@@ -6769,6 +7052,27 @@ DWORD Inject(BOOL bIsExplorer)
     }
 
 
+    DWORD dwSize = 0;
+    if (SHRegGetValueFromHKCUHKLMFunc && SHRegGetValueFromHKCUHKLMFunc(
+        L"Control Panel\\Desktop\\WindowMetrics",
+        L"MinWidth",
+        SRRF_RT_REG_SZ,
+        NULL,
+        NULL,
+        (LPDWORD)(&dwSize)
+    ) != ERROR_SUCCESS)
+    {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER, 
+            L"Control Panel\\Desktop\\WindowMetrics",
+            L"MinWidth",
+            REG_SZ,
+            L"38",
+            sizeof(L"38")
+        );
+    }
+
+
     CreateThread(
         0,
         0,
@@ -6778,6 +7082,12 @@ DWORD Inject(BOOL bIsExplorer)
         0
     );
     printf("Open Start on monitor thread\n");
+
+
+    if (bDisableOfficeHotkeys)
+    {
+        VnPatchIAT(hExplorer, "user32.dll", "RegisterHotKey", explorer_RegisterHotkeyHook);
+    }
 
 
     if (bEnableArchivePlugin)
