@@ -1,4 +1,9 @@
 #include "utility.h"
+#include <Wininet.h>
+#pragma comment(lib, "Wininet.lib")
+
+RTL_OSVERSIONINFOW global_rovi;
+DWORD32 global_ubr;
 
 #pragma region "Weird stuff"
 INT64 STDMETHODCALLTYPE nimpl4_1(INT64 a1, DWORD* a2)
@@ -297,7 +302,7 @@ void* ReadFromFile(wchar_t* wszFileName, DWORD* dwSize)
     return ok;
 }
 
-int ComputeFileHash(LPCWSTR filename, LPCSTR hash, DWORD dwHash)
+int ComputeFileHash(LPCWSTR filename, LPSTR hash, DWORD dwHash)
 {
     DWORD dwStatus = 0;
     BOOL bResult = FALSE;
@@ -407,6 +412,33 @@ int ComputeFileHash(LPCWSTR filename, LPCSTR hash, DWORD dwHash)
     free(rgbFile);
 
     return dwStatus;
+}
+
+int ComputeFileHash2(HMODULE hModule, LPCWSTR filename, LPSTR hash, DWORD dwHash)
+{
+    if (dwHash < 33)
+    {
+        return ERROR_BUFFER_OVERFLOW;
+    }
+    if (!hModule)
+    {
+        return ERROR_INVALID_ADDRESS;
+    }
+
+    DWORD dwLeftMost = 0;
+    DWORD dwSecondLeft = 0;
+    DWORD dwSecondRight = 0;
+    DWORD dwRightMost = 0;
+    QueryVersionInfo(hModule, VS_VERSION_INFO, &dwLeftMost, &dwSecondLeft, &dwSecondRight, &dwRightMost);
+
+    sprintf_s(hash, 33, "%d.%d.%d.%d.", dwLeftMost, dwSecondLeft, dwSecondRight, dwRightMost);
+
+    char real_hash[33];
+    ComputeFileHash(filename, real_hash, 33);
+    strncpy_s(hash + strlen(hash), dwHash - strlen(hash), real_hash, 32 - strlen(hash));
+    hash[33] = 0;
+
+    return ERROR_SUCCESS;
 }
 
 void LaunchPropertiesGUI(HMODULE hModule)
@@ -653,4 +685,784 @@ void ToggleTaskbarAutohide()
         abd.lParam = ABS_AUTOHIDE;
         SHAppBarMessage(ABM_SETSTATE, &abd);
     }
+}
+
+LSTATUS RegisterDWMService(DWORD dwDesiredState, DWORD dwOverride)
+{
+    WCHAR wszPath[MAX_PATH];
+    GetSystemDirectoryW(wszPath, MAX_PATH);
+    wcscat_s(wszPath, MAX_PATH, L"\\cmd.exe");
+
+    WCHAR wszSCPath[MAX_PATH];
+    GetSystemDirectoryW(wszSCPath, MAX_PATH);
+    wcscat_s(wszSCPath, MAX_PATH, L"\\sc.exe");
+
+    WCHAR wszRundll32[MAX_PATH];
+    SHGetFolderPathW(NULL, SPECIAL_FOLDER, NULL, SHGFP_TYPE_CURRENT, wszRundll32);
+    wcscat_s(wszRundll32, MAX_PATH, _T(APP_RELATIVE_PATH));
+    wcscat_s(wszRundll32, MAX_PATH, L"\\ep_dwm.exe");
+
+    WCHAR wszEP[MAX_PATH];
+    GetWindowsDirectoryW(wszEP, MAX_PATH);
+    wcscat_s(wszEP, MAX_PATH, L"\\dxgi.dll");
+
+    WCHAR wszTaskkill[MAX_PATH];
+    GetSystemDirectoryW(wszTaskkill, MAX_PATH);
+    wcscat_s(wszTaskkill, MAX_PATH, L"\\taskkill.exe");
+
+    WCHAR wszArgumentsRegister[MAX_PATH * 10];
+    swprintf_s(
+        wszArgumentsRegister,
+        MAX_PATH * 10,
+        L"/c \""
+        L"\"%s\" create " _T(EP_DWM_SERVICENAME) L" binPath= \"\\\"%s\\\" %s\" DisplayName= \"ExplorerPatcher Desktop Window Manager Service\" start= auto & "
+        L"\"%s\" description " _T(EP_DWM_SERVICENAME) L" \"Service for managing aspects related to the Desktop Window Manager.\" & "
+        L"\"%s\" %s " _T(EP_DWM_SERVICENAME)
+        L"\"",
+        wszSCPath,
+        wszRundll32,
+        _T(EP_DWM_SERVICENAME) L" " _T(EP_DWM_EVENTNAME),
+        wszSCPath,
+        wszSCPath,
+        (!dwOverride || dwOverride == 3) ? L"start" : L"query"
+    );
+    WCHAR wszArgumentsUnRegister[MAX_PATH * 10];
+    swprintf_s(
+        wszArgumentsUnRegister,
+        MAX_PATH * 10,
+        L"/c \""
+        L"\"%s\" stop " _T(EP_DWM_SERVICENAME) L" & "
+        L"\"%s\" delete " _T(EP_DWM_SERVICENAME) L" & "
+        L"\"",
+        wszSCPath,
+        wszSCPath
+    );
+    wprintf(L"%s\n", wszArgumentsRegister);
+
+    BOOL bAreRoundedCornersDisabled = FALSE;
+    if (dwOverride)
+    {
+        bAreRoundedCornersDisabled = !(dwOverride - 1);
+    }
+    else
+    {
+        HANDLE h_exists = CreateEventW(NULL, FALSE, FALSE, _T(EP_DWM_EVENTNAME));
+        if (h_exists)
+        {
+            if (GetLastError() == ERROR_ALREADY_EXISTS)
+            {
+                bAreRoundedCornersDisabled = TRUE;
+            }
+            else
+            {
+                bAreRoundedCornersDisabled = FALSE;
+            }
+            CloseHandle(h_exists);
+        }
+        else
+        {
+            if (GetLastError() == ERROR_ACCESS_DENIED)
+            {
+                bAreRoundedCornersDisabled = TRUE;
+            }
+            else
+            {
+                bAreRoundedCornersDisabled = FALSE;
+            }
+        }
+        if ((bAreRoundedCornersDisabled && dwDesiredState) || (!bAreRoundedCornersDisabled && !dwDesiredState))
+        {
+            return FALSE;
+        }
+    }
+    SHELLEXECUTEINFO ShExecInfo = { 0 };
+    ShExecInfo.cbSize = sizeof(SHELLEXECUTEINFO);
+    ShExecInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
+    ShExecInfo.hwnd = NULL;
+    ShExecInfo.lpVerb = L"runas";
+    ShExecInfo.lpFile = wszPath;
+    ShExecInfo.lpParameters = !bAreRoundedCornersDisabled ? wszArgumentsRegister : wszArgumentsUnRegister;
+    ShExecInfo.lpDirectory = NULL;
+    ShExecInfo.nShow = SW_HIDE;
+    ShExecInfo.hInstApp = NULL;
+    if (ShellExecuteExW(&ShExecInfo) && ShExecInfo.hProcess)
+    {
+        WaitForSingleObject(ShExecInfo.hProcess, INFINITE);
+        DWORD dwExitCode = 0;
+        GetExitCodeProcess(ShExecInfo.hProcess, &dwExitCode);
+        CloseHandle(ShExecInfo.hProcess);
+    }
+    return TRUE;
+}
+
+char* StrReplaceAllA(const char* s, const char* oldW, const char* newW, int* dwNewSize)
+{
+    char* result;
+    int i, cnt = 0;
+    int newWlen = strlen(newW);
+    int oldWlen = strlen(oldW);
+
+    for (i = 0; s[i] != '\0'; i++) {
+        if (strstr(&s[i], oldW) == &s[i]) {
+            cnt++;
+            i += oldWlen - 1;
+        }
+    }
+    result = (char*)malloc(i + cnt * (newWlen - oldWlen) + 1);
+    i = 0;
+    while (*s) {
+        if (strstr(s, oldW) == s) {
+            strcpy_s(&result[i], strlen(newW) + 1, newW);
+            i += newWlen;
+            s += oldWlen;
+        }
+        else
+            result[i++] = *s++;
+    }
+
+    result[i] = '\0';
+    if (dwNewSize) *dwNewSize = i;
+    return result;
+}
+
+WCHAR* StrReplaceAllW(const WCHAR* s, const WCHAR* oldW, const WCHAR* newW, int* dwNewSize)
+{
+    WCHAR* result;
+    int i, cnt = 0;
+    int newWlen = wcslen(newW);
+    int oldWlen = wcslen(oldW);
+
+    for (i = 0; s[i] != L'\0'; i++) {
+        if (wcsstr(&s[i], oldW) == &s[i]) {
+            cnt++;
+            i += oldWlen - 1;
+        }
+    }
+    result = (WCHAR*)malloc((i + cnt * (newWlen - oldWlen) + 1) * sizeof(WCHAR));
+    i = 0;
+    while (*s) {
+        if (wcsstr(s, oldW) == s) {
+            wcscpy_s(&result[i], newWlen + 1, newW);
+            i += newWlen;
+            s += oldWlen;
+        }
+        else
+            result[i++] = *s++;
+    }
+    result[i] = L'\0';
+    if (dwNewSize) *dwNewSize = i;
+    return result;
+}
+
+HWND InputBox_HWND;
+
+HRESULT getEngineGuid(LPCTSTR extension, GUID* guidBuffer)
+{
+    wchar_t   buffer[100];
+    HKEY      hk;
+    DWORD     size;
+    HKEY      subKey;
+    DWORD     type;
+
+    // See if this file extension is associated
+    // with an ActiveX script engine
+    if (!RegOpenKeyEx(HKEY_CLASSES_ROOT, extension, 0,
+        KEY_QUERY_VALUE | KEY_READ, &hk))
+    {
+        type = REG_SZ;
+        size = sizeof(buffer);
+        size = RegQueryValueEx(hk, 0, 0, &type,
+            (LPBYTE)&buffer[0], &size);
+        RegCloseKey(hk);
+        if (!size)
+        {
+            // The engine set an association.
+            // We got the Language string in buffer[]. Now
+            // we can use it to look up the engine's GUID
+
+            // Open HKEY_CLASSES_ROOT\{LanguageName}
+        again:   size = sizeof(buffer);
+            if (!RegOpenKeyEx(HKEY_CLASSES_ROOT, (LPCTSTR)&buffer[0], 0,
+                KEY_QUERY_VALUE | KEY_READ, &hk))
+            {
+                // Read the GUID (in string format)
+                // into buffer[] by querying the value of CLSID
+                if (!RegOpenKeyEx(hk, L"CLSID", 0,
+                    KEY_QUERY_VALUE | KEY_READ, &subKey))
+                {
+                    size = RegQueryValueExW(subKey, 0, 0, &type,
+                        (LPBYTE)&buffer[0], &size);
+                    RegCloseKey(subKey);
+                }
+                else if (extension)
+                {
+                    // If an error, see if we have a "ScriptEngine"
+                    // key under here that contains
+                    // the real language name
+                    if (!RegOpenKeyEx(hk, L"ScriptEngine", 0,
+                        KEY_QUERY_VALUE | KEY_READ, &subKey))
+                    {
+                        size = RegQueryValueEx(subKey, 0, 0, &type,
+                            (LPBYTE)&buffer[0], &size);
+                        RegCloseKey(subKey);
+                        if (!size)
+                        {
+                            RegCloseKey(hk);
+                            extension = 0;
+                            goto again;
+                        }
+                    }
+                }
+            }
+
+            RegCloseKey(hk);
+
+            if (!size)
+            {
+                // Convert the GUID string to a GUID
+                // and put it in caller's guidBuffer
+                if ((size = CLSIDFromString(&buffer[0], guidBuffer)))
+                {
+                    return(E_FAIL);
+                }
+                return(size);
+            }
+        }
+    }
+
+    return(E_FAIL);
+}
+
+ULONG STDMETHODCALLTYPE ep_static_AddRefRelease(void* _this)
+{
+    return 1;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_QueryInterface(void* _this, REFIID riid, void** ppv)
+{
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IActiveScriptSite))
+        *ppv = _this;
+    else if (IsEqualIID(riid, &IID_IActiveScriptSiteWindow))
+        *ppv = ((unsigned char*)_this + 8);
+    else
+    {
+        *ppv = 0;
+        return(E_NOINTERFACE);
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSiteWindow_QueryInterface(void* _this, REFIID riid, void** ppv)
+{
+    return IActiveScriptSite_QueryInterface((char*)_this - 8, riid, ppv);
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_GetLCID(void* _this, LCID* plcid)
+{
+    *plcid = LOCALE_USER_DEFAULT;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_GetItemInfo(void* _this, LPCOLESTR pstrName, DWORD dwReturnMask, IUnknown** ppiunkItem, ITypeInfo** ppti)
+{
+    return TYPE_E_ELEMENTNOTFOUND;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_GetDocVersionString(void* _this, BSTR* pbstrVersion)
+{
+    *pbstrVersion = 0;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_OnScriptTerminate(void* _this, const void* pvarResult, const EXCEPINFO* pexcepinfo)
+{
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_OnStateChange(void* _this, SCRIPTSTATE ssScriptState)
+{
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_OnScriptError(void* _this, IActiveScriptError* scriptError)
+{
+    ULONG        lineNumber;
+    BSTR         desc;
+    EXCEPINFO    ei;
+    OLECHAR      wszOutput[1024];
+
+    // Call GetSourcePosition() to retrieve the line # where
+    // the error occurred in the script
+    scriptError->lpVtbl->GetSourcePosition(scriptError, 0, &lineNumber, 0);
+
+    // Call GetSourceLineText() to retrieve the line in the script that
+    // has an error.
+    desc = 0;
+    scriptError->lpVtbl->GetSourceLineText(scriptError, &desc);
+
+    // Call GetExceptionInfo() to fill in our EXCEPINFO struct with more
+    // information.
+    ZeroMemory(&ei, sizeof(EXCEPINFO));
+    scriptError->lpVtbl->GetExceptionInfo(scriptError, &ei);
+
+    // Format the message we'll display to the user
+    wsprintfW(&wszOutput[0], L"%s\nLine %u: %s\n%s", ei.bstrSource,
+        lineNumber + 1, ei.bstrDescription, desc ? desc : "");
+
+    // Free what we got from the IActiveScriptError functions
+    SysFreeString(desc);
+    SysFreeString(ei.bstrSource);
+    SysFreeString(ei.bstrDescription);
+    SysFreeString(ei.bstrHelpFile);
+
+    // Display the message
+    MessageBoxW(0, &wszOutput[0], L"Error",
+        MB_SETFOREGROUND | MB_OK | MB_ICONEXCLAMATION);
+
+    return(S_OK);
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_OnEnterScript(void* _this)
+{
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSite_OnLeaveScript(void* _this)
+{
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSiteWindow_GetWindow(void* _this, HWND* phWnd)
+{
+    *phWnd = InputBox_HWND;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE IActiveScriptSiteWindow_EnableModeless(void* _this, BOOL fEnable)
+{
+    return S_OK;
+}
+
+static const IActiveScriptSiteVtbl IActiveScriptSite_Vtbl = {
+    .QueryInterface = IActiveScriptSite_QueryInterface,
+    .AddRef = ep_static_AddRefRelease,
+    .Release = ep_static_AddRefRelease,
+    .GetLCID = IActiveScriptSite_GetLCID,
+    .GetItemInfo = IActiveScriptSite_GetItemInfo,
+    .GetDocVersionString = IActiveScriptSite_GetDocVersionString,
+    .OnScriptTerminate = IActiveScriptSite_OnScriptTerminate,
+    .OnStateChange = IActiveScriptSite_OnStateChange,
+    .OnScriptError = IActiveScriptSite_OnScriptError,
+    .OnEnterScript = IActiveScriptSite_OnEnterScript,
+    .OnLeaveScript = IActiveScriptSite_OnLeaveScript,
+};
+
+static const IActiveScriptSiteWindowVtbl IActiveScriptSiteWindow_Vtbl = {
+    .QueryInterface = IActiveScriptSiteWindow_QueryInterface,
+    .AddRef = ep_static_AddRefRelease,
+    .Release = ep_static_AddRefRelease,
+    .GetWindow = IActiveScriptSiteWindow_GetWindow,
+    .EnableModeless = IActiveScriptSiteWindow_EnableModeless,
+};
+
+typedef struct _CSimpleScriptSite
+{
+    IActiveScriptSiteVtbl* lpVtbl;
+    IActiveScriptSiteWindowVtbl* lpVtbl1;
+} CSimpleScriptSite;
+
+static const CSimpleScriptSite CSimpleScriptSite_Instance = {
+    .lpVtbl = &IActiveScriptSite_Vtbl,
+    .lpVtbl1 = &IActiveScriptSiteWindow_Vtbl
+};
+
+static BOOL HideInput = FALSE;
+static LRESULT CALLBACK InputBoxProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode < HC_ACTION)
+        return CallNextHookEx(0, nCode, wParam, lParam);
+    if (nCode = HCBT_ACTIVATE) {
+        if (HideInput == TRUE) {
+            HWND TextBox = FindWindowExA((HWND)wParam, NULL, "Edit", NULL);
+            SendDlgItemMessageW((HWND)wParam, GetDlgCtrlID(TextBox), EM_SETPASSWORDCHAR, L'\x25cf', 0);
+        }
+    }
+    if (nCode = HCBT_CREATEWND) {
+        if (!(GetWindowLongPtr((HWND)wParam, GWL_STYLE) & WS_CHILD))
+            SetWindowLongPtr((HWND)wParam, GWL_EXSTYLE, GetWindowLongPtr((HWND)wParam, GWL_EXSTYLE) | WS_EX_DLGMODALFRAME);
+    }
+    return CallNextHookEx(0, nCode, wParam, lParam);
+}
+
+HRESULT InputBox(BOOL bPassword, HWND hWnd, LPCWSTR wszPrompt, LPCWSTR wszTitle, LPCWSTR wszDefault, LPWSTR wszAnswer, DWORD cbAnswer, BOOL* bCancelled)
+{
+    HRESULT hr = S_OK;
+
+    if (!wszPrompt || !wszTitle || !wszDefault || !wszAnswer || !cbAnswer || !bCancelled)
+    {
+        return E_FAIL;
+    }
+
+    GUID guidBuffer;
+    hr = getEngineGuid(L".vbs", &guidBuffer);
+
+    DWORD cchPromptSafe = 0, cchTitleSafe = 0, cchDefaultSafe = 0;
+    LPWSTR wszPromptSafe = StrReplaceAllW(wszPrompt, L"\"", L"\"\"", &cchPromptSafe);
+    LPWSTR wszTitleSafe = StrReplaceAllW(wszTitle, L"\"", L"\"\"", &cchTitleSafe);
+    LPWSTR wszDefaultSafe = StrReplaceAllW(wszDefault, L"\"", L"\"\"", &cchDefaultSafe);
+    if (!wszPromptSafe || !wszTitleSafe || !wszDefaultSafe)
+    {
+        if (wszPromptSafe)
+        {
+            free(wszPromptSafe);
+        }
+        if (wszTitleSafe)
+        {
+            free(wszTitleSafe);
+        }
+        if (wszDefaultSafe)
+        {
+            free(wszDefaultSafe);
+        }
+        return E_OUTOFMEMORY;
+    }
+
+    IActiveScript* pActiveScript = NULL;
+    hr = CoCreateInstance(FAILED(hr) ? &CLSID_VBScript : &guidBuffer, 0, CLSCTX_ALL,
+        &IID_IActiveScript,
+        (void**)&pActiveScript);
+    if (SUCCEEDED(hr) && pActiveScript)
+    {
+        hr = pActiveScript->lpVtbl->SetScriptSite(pActiveScript, &CSimpleScriptSite_Instance);
+        if (SUCCEEDED(hr))
+        {
+            IActiveScriptParse* pActiveScriptParse = NULL;
+            hr = pActiveScript->lpVtbl->QueryInterface(pActiveScript, &IID_IActiveScriptParse, &pActiveScriptParse);
+            if (SUCCEEDED(hr) && pActiveScriptParse)
+            {
+                hr = pActiveScriptParse->lpVtbl->InitNew(pActiveScriptParse);
+                if (SUCCEEDED(hr))
+                {
+                    LPWSTR wszEvaluation = malloc(sizeof(WCHAR) * (cchPromptSafe + cchTitleSafe + cchDefaultSafe + 100));
+                    if (wszEvaluation)
+                    {
+                        swprintf_s(wszEvaluation, cchPromptSafe + cchTitleSafe + cchDefaultSafe + 100, L"InputBox(\"%s\", \"%s\", \"%s\")", wszPromptSafe, wszTitleSafe, wszDefaultSafe);
+                        DWORD cchEvaluation2 = 0;
+                        LPWSTR wszEvaluation2 = StrReplaceAllW(wszEvaluation, L"\n", L"\" + vbNewLine + \"", &cchEvaluation2);
+                        if (wszEvaluation2)
+                        {
+                            EXCEPINFO ei;
+                            ZeroMemory(&ei, sizeof(EXCEPINFO));
+                            DWORD dwThreadId = GetCurrentThreadId();
+                            HINSTANCE hInstance = GetModuleHandle(NULL);
+
+                            if (!hWnd)
+                            {
+                                InputBox_HWND = GetAncestor(GetActiveWindow(), GA_ROOTOWNER);
+                            }
+                            else
+                            {
+                                InputBox_HWND = hWnd;
+                            }
+
+                            HHOOK hHook = SetWindowsHookExW(WH_CBT, &InputBoxProc, hInstance, dwThreadId);
+
+                            VARIANT result;
+                            VariantInit(&result);
+
+                            HideInput = bPassword;
+                            hr = pActiveScriptParse->lpVtbl->ParseScriptText(pActiveScriptParse, wszEvaluation2, NULL, NULL, NULL, 0, 0, SCRIPTTEXT_ISEXPRESSION, &result, &ei);
+
+                            *bCancelled = (result.vt == VT_EMPTY);
+
+                            UnhookWindowsHookEx(hHook);
+
+                            free(wszEvaluation2);
+
+                            if (result.bstrVal)
+                            {
+                                memcpy(wszAnswer, result.bstrVal, cbAnswer * sizeof(WCHAR));
+                            }
+                            else
+                            {
+                                if (result.vt != VT_EMPTY)
+                                {
+                                    wszAnswer[0] = 0;
+                                }
+                            }
+
+                            VariantClear(&result);
+                        }
+                        free(wszEvaluation);
+                    }
+                }
+                pActiveScriptParse->lpVtbl->Release(pActiveScriptParse);
+            }
+            pActiveScript->lpVtbl->Release(pActiveScript);
+        }
+    }
+
+    if (wszPromptSafe)
+    {
+        free(wszPromptSafe);
+    }
+    if (wszTitleSafe)
+    {
+        free(wszTitleSafe);
+    }
+    if (wszDefaultSafe)
+    {
+        free(wszDefaultSafe);
+    }
+
+    return hr;
+}
+
+UINT PleaseWaitTimeout = 0;
+HHOOK PleaseWaitHook = NULL;
+HWND PleaseWaitHWND = NULL;
+void* PleaseWaitCallbackData = NULL;
+BOOL (*PleaseWaitCallbackFunc)(void* data) = NULL;
+BOOL PleaseWait_UpdateTimeout(int timeout)
+{
+    if (PleaseWaitHWND)
+    {
+        KillTimer(PleaseWaitHWND, 'EPPW');
+        PleaseWaitTimeout = timeout;
+        return SetTimer(PleaseWaitHWND, 'EPPW', PleaseWaitTimeout, PleaseWait_TimerProc);
+    }
+    return FALSE;
+}
+
+VOID CALLBACK PleaseWait_TimerProc(HWND hWnd, UINT uMsg, UINT idEvent, DWORD dwTime)
+{
+    if (idEvent == 'EPPW')
+    {
+        if (PleaseWaitCallbackFunc)
+        {
+            if (PleaseWaitCallbackFunc(PleaseWaitCallbackData))
+            {
+                return;
+            }
+            PleaseWaitCallbackData = NULL;
+            PleaseWaitCallbackFunc = NULL;
+        }
+        KillTimer(hWnd, 'EPPW');
+        SetTimer(hWnd, 'EPPW', 0, NULL); // <- this closes the message box
+        PleaseWaitHWND = NULL;
+        PleaseWaitTimeout = 0;
+    }
+}
+
+LRESULT CALLBACK PleaseWait_HookProc(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code < 0)
+    {
+        return CallNextHookEx(NULL, code, wParam, lParam);
+    }
+
+    CWPSTRUCT* msg = (CWPSTRUCT*)lParam;
+    /*if (msg->message == WM_CREATE)
+    {
+        CREATESTRUCT* pCS = (CREATESTRUCT*)msg->lParam;
+        if (pCS->lpszClass == RegisterWindowMessageW(L"Button"))
+        {
+        }
+    }*/
+    LRESULT result = CallNextHookEx(NULL, code, wParam, lParam);
+
+    if (msg->message == WM_INITDIALOG)
+    {
+        PleaseWaitHWND = msg->hwnd;
+        EnableWindow(PleaseWaitHWND, FALSE);
+        LONG_PTR style = GetWindowLongPtrW(PleaseWaitHWND, GWL_STYLE);
+        SetWindowLongPtrW(PleaseWaitHWND, GWL_STYLE, style & ~WS_SYSMENU);
+        RECT rc;
+        GetWindowRect(PleaseWaitHWND, &rc);
+        SetWindowPos(PleaseWaitHWND, NULL, 0, 0, rc.right - rc.left, rc.bottom - rc.top - MulDiv(50, GetDpiForWindow(PleaseWaitHWND), 96), SWP_NOMOVE | SWP_FRAMECHANGED);
+        SetTimer(PleaseWaitHWND, 'EPPW', PleaseWaitTimeout, PleaseWait_TimerProc);
+        UnhookWindowsHookEx(PleaseWaitHook);
+        PleaseWaitHook = NULL;
+    }
+    return result;
+}
+
+BOOL DownloadAndInstallWebView2Runtime()
+{
+    BOOL bOK = FALSE;
+    HINTERNET hInternet = NULL;
+    if (hInternet = InternetOpenA(
+        "ExplorerPatcher",
+        INTERNET_OPEN_TYPE_PRECONFIG,
+        NULL,
+        NULL,
+        0
+    ))
+    {
+        HINTERNET hConnect = InternetOpenUrlA(
+            hInternet,
+            "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
+            NULL,
+            0,
+            INTERNET_FLAG_RAW_DATA |
+            INTERNET_FLAG_RELOAD |
+            INTERNET_FLAG_RESYNCHRONIZE |
+            INTERNET_FLAG_NO_COOKIES |
+            INTERNET_FLAG_NO_UI |
+            INTERNET_FLAG_NO_CACHE_WRITE |
+            INTERNET_FLAG_DONT_CACHE,
+            NULL
+        );
+        if (hConnect)
+        {
+            char* exe_buffer = NULL;
+            DWORD dwSize = 2 * 1024 * 1024;
+            DWORD dwRead = dwSize;
+            exe_buffer = calloc(dwSize, sizeof(char));
+            if (exe_buffer)
+            {
+                BOOL bRet = FALSE;
+                if (bRet = InternetReadFile(
+                    hConnect,
+                    exe_buffer,
+                    dwSize - 1,
+                    &dwRead
+                ))
+                {
+                    WCHAR wszPath[MAX_PATH];
+                    ZeroMemory(wszPath, MAX_PATH * sizeof(WCHAR));
+                    SHGetFolderPathW(NULL, SPECIAL_FOLDER_LEGACY, NULL, SHGFP_TYPE_CURRENT, wszPath);
+                    wcscat_s(wszPath, MAX_PATH, _T(APP_RELATIVE_PATH));
+                    BOOL bRet = CreateDirectoryW(wszPath, NULL);
+                    if (bRet || (!bRet && GetLastError() == ERROR_ALREADY_EXISTS))
+                    {
+                        wcscat_s(wszPath, MAX_PATH, L"\\MicrosoftEdgeWebview2Setup.exe");
+                        FILE* f = NULL;
+                        _wfopen_s(&f, wszPath, L"wb");
+                        if (f)
+                        {
+                            fwrite(exe_buffer, 1, dwRead, f);
+                            fclose(f);
+                            SHELLEXECUTEINFOW sei;
+                            ZeroMemory(&sei, sizeof(SHELLEXECUTEINFOW));
+                            sei.cbSize = sizeof(sei);
+                            sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+                            sei.hwnd = NULL;
+                            sei.hInstApp = NULL;
+                            sei.lpVerb = NULL;
+                            sei.lpFile = wszPath;
+                            sei.lpParameters = L"";
+                            sei.hwnd = NULL;
+                            sei.nShow = SW_SHOWMINIMIZED;
+                            if (ShellExecuteExW(&sei) && sei.hProcess)
+                            {
+                                WaitForSingleObject(sei.hProcess, INFINITE);
+                                CloseHandle(sei.hProcess);
+                                Sleep(100);
+                                DeleteFileW(wszPath);
+                                bOK = TRUE;
+                            }
+                        }
+                    }
+                }
+                free(exe_buffer);
+            }
+            InternetCloseHandle(hConnect);
+        }
+        InternetCloseHandle(hInternet);
+    }
+    return bOK;
+}
+
+BOOL DownloadFile(LPCWSTR wszURL, DWORD dwSize, LPCWSTR wszPath)
+{
+    BOOL bOK = FALSE;
+    HINTERNET hInternet = NULL;
+    if (hInternet = InternetOpenW(
+        L"ExplorerPatcher",
+        INTERNET_OPEN_TYPE_PRECONFIG,
+        NULL,
+        NULL,
+        0
+    ))
+    {
+        HINTERNET hConnect = InternetOpenUrlW(
+            hInternet,
+            wszURL,
+            NULL,
+            0,
+            INTERNET_FLAG_RAW_DATA |
+            INTERNET_FLAG_RELOAD |
+            INTERNET_FLAG_RESYNCHRONIZE |
+            INTERNET_FLAG_NO_COOKIES |
+            INTERNET_FLAG_NO_UI |
+            INTERNET_FLAG_NO_CACHE_WRITE |
+            INTERNET_FLAG_DONT_CACHE,
+            NULL
+        );
+        if (hConnect)
+        {
+            char* exe_buffer = NULL;
+            DWORD dwRead = dwSize;
+            exe_buffer = calloc(dwSize, sizeof(char));
+            if (exe_buffer)
+            {
+                BOOL bRet = FALSE;
+                if (bRet = InternetReadFile(
+                    hConnect,
+                    exe_buffer,
+                    dwSize - 1,
+                    &dwRead
+                ))
+                {
+                    FILE* f = NULL;
+                    _wfopen_s(&f, wszPath, L"wb");
+                    if (f)
+                    {
+                        fwrite(exe_buffer, 1, dwRead, f);
+                        fclose(f);
+                    }
+                }
+                free(exe_buffer);
+            }
+            InternetCloseHandle(hConnect);
+        }
+        InternetCloseHandle(hInternet);
+    }
+    return bOK;
+}
+
+BOOL IsConnectedToInternet()
+{
+    BOOL connectedStatus = FALSE;
+    HRESULT hr = S_FALSE;
+
+    hr = CoInitialize(NULL);
+    if (SUCCEEDED(hr))
+    {
+        INetworkListManager* pNetworkListManager;
+        hr = CoCreateInstance(&CLSID_NetworkListManager, NULL, CLSCTX_ALL, &IID_NetworkListManager, (LPVOID*)&pNetworkListManager);
+        if (SUCCEEDED(hr))
+        {
+            NLM_CONNECTIVITY nlmConnectivity = NLM_CONNECTIVITY_DISCONNECTED;
+            VARIANT_BOOL isConnected = VARIANT_FALSE;
+            hr = pNetworkListManager->lpVtbl->get_IsConnectedToInternet(pNetworkListManager, &isConnected);
+            if (SUCCEEDED(hr))
+            {
+                if (isConnected == VARIANT_TRUE)
+                    connectedStatus = TRUE;
+                else
+                    connectedStatus = FALSE;
+            }
+            if (isConnected == VARIANT_FALSE && SUCCEEDED(pNetworkListManager->lpVtbl->GetConnectivity(pNetworkListManager, &nlmConnectivity)))
+            {
+                if (nlmConnectivity & (NLM_CONNECTIVITY_IPV4_LOCALNETWORK | NLM_CONNECTIVITY_IPV4_SUBNET | NLM_CONNECTIVITY_IPV6_LOCALNETWORK | NLM_CONNECTIVITY_IPV6_SUBNET))
+                {
+                    connectedStatus = 2;
+                }
+            }
+            pNetworkListManager->lpVtbl->Release(pNetworkListManager);
+        }
+        CoUninitialize();
+    }
+    return connectedStatus;
 }

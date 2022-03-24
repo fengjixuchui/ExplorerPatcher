@@ -16,43 +16,16 @@
 #pragma comment(lib, "Rstrtmgr.lib")
 #define _LIBVALINET_INCLUDE_UNIVERSAL
 #include <valinet/universal/toast/toast.h>
+#include "osutility.h"
 #include "queryversion.h"
 #pragma comment(lib, "Psapi.lib")
+#include <activscp.h>
+#include <netlistmgr.h>
 
-#define APPID L"Microsoft.Windows.Explorer"
-#define REGPATH "SOFTWARE\\ExplorerPatcher"
-#define REGPATH_OLD "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ExplorerPatcher"
-#define REGPATH_STARTMENU REGPATH_OLD
-#define SPECIAL_FOLDER CSIDL_PROGRAM_FILES
-#define SPECIAL_FOLDER_LEGACY CSIDL_APPDATA
-#define PRODUCT_NAME "ExplorerPatcher"
-#define PRODUCT_PUBLISHER "VALINET Solutions SRL"
-#define APP_RELATIVE_PATH "\\" PRODUCT_NAME
-#define EP_CLSID "{D17F1E1A-5919-4427-8F89-A1A8503CA3EB}"
-#define DOSMODE_OFFSET 78
-#define SETUP_UTILITY_NAME "ep_setup.exe"
-#define TOAST_BUFSIZ 1024
-#define SEH_REGPATH "Control Panel\\Quick Actions\\Control Center\\QuickActionsStateCapture\\ExplorerPatcher"
-#define EP_SETUP_HELPER_SWITCH "/CreateExplorerShellUnelevatedAfterServicing"
+#include "def.h"
 
 #define WM_MSG_GUI_SECTION WM_USER + 1
 #define WM_MSG_GUI_SECTION_GET 1
-
-// This allows compiling with older Windows SDKs as well
-#ifndef NTDDI_WIN10_CO
-#define DWMWA_USE_HOSTBACKDROPBRUSH 17            // [set] BOOL, Allows the use of host backdrop brushes for the window.
-#define DWMWA_USE_IMMERSIVE_DARK_MODE 20          // [set] BOOL, Allows a window to either use the accent color, or dark, according to the user Color Mode preferences.
-#define DWMWA_WINDOW_CORNER_PREFERENCE 33         // [set] WINDOW_CORNER_PREFERENCE, Controls the policy that rounds top-level window corners
-#define DWMWA_BORDER_COLOR 34                     // [set] COLORREF, The color of the thin border around a top-level window
-#define DWMWA_CAPTION_COLOR 35                    // [set] COLORREF, The color of the caption
-#define DWMWA_TEXT_COLOR 36                       // [set] COLORREF, The color of the caption text
-#define DWMWA_VISIBLE_FRAME_BORDER_THICKNESS 37   // [get] UINT, width of the visible border around a thick frame window
-#define DWMWCP_DEFAULT 0
-#define DWMWCP_DONOTROUND 1
-#define DWMWCP_ROUND 2
-#define DWMWCP_ROUNDSMALL 3
-#endif
-#define DWMWA_MICA_EFFFECT 1029
 
 DEFINE_GUID(CLSID_ImmersiveShell,
     0xc2f03a33,
@@ -65,6 +38,18 @@ DEFINE_GUID(IID_OpenControlPanel,
     0x66De, 0x4DF4, 0xBf, 0x6C,
     0x1F, 0x56, 0x21, 0x99, 0x6A, 0xF1
 );
+
+DEFINE_GUID(CLSID_VBScript,
+    0xB54F3741, 
+    0x5B07, 0x11CF, 0xA4, 0xB0, 
+    0x00, 0xAA, 0x00, 0x4A, 0x55, 0xE8
+);
+
+DEFINE_GUID(CLSID_NetworkListManager,
+    0xDCB00C01, 0x570F, 0x4A9B, 0x8D, 0x69, 0x19, 0x9F, 0xDB, 0xA5, 0x72, 0x3B);
+
+DEFINE_GUID(IID_NetworkListManager,
+    0xDCB00000, 0x570F, 0x4A9B, 0x8D, 0x69, 0x19, 0x9F, 0xDB, 0xA5, 0x72, 0x3B);
 
 typedef struct _StuckRectsData
 {
@@ -234,17 +219,54 @@ static void(*AllowDarkModeForWindow)(HWND hWnd, INT64 bAllowDark);
 
 static BOOL(*ShouldAppsUseDarkMode)();
 
+static BOOL(*ShouldSystemUseDarkMode)();
+
 static void(*GetThemeName)(void*, void*, void*);
 
 static BOOL AppsShouldUseDarkMode() { return TRUE; }
 
 void* ReadFromFile(wchar_t* wszFileName, DWORD* dwSize);
 
-int ComputeFileHash(LPCWSTR filename, LPCSTR hash, DWORD dwHash);
+int ComputeFileHash(LPCWSTR filename, LPSTR hash, DWORD dwHash);
+
+int ComputeFileHash2(HMODULE hModule, LPCWSTR filename, LPSTR hash, DWORD dwHash);
 
 void LaunchPropertiesGUI(HMODULE hModule);
 
 BOOL SystemShutdown(BOOL reboot);
+
+LSTATUS RegisterDWMService(DWORD dwDesiredState, DWORD dwOverride);
+
+char* StrReplaceAllA(const char* s, const char* oldW, const char* newW, int* dwNewSize);
+
+WCHAR* StrReplaceAllW(const WCHAR* s, const WCHAR* oldW, const WCHAR* newW, int* dwNewSize);
+
+HRESULT InputBox(BOOL bPassword, HWND hWnd, LPCWSTR wszPrompt, LPCWSTR wszTitle, LPCWSTR wszDefault, LPWSTR wszAnswer, DWORD cbAnswer, BOOL* bCancelled);
+
+inline BOOL IsHighContrast()
+{
+    HIGHCONTRASTW highContrast;
+    ZeroMemory(&highContrast, sizeof(HIGHCONTRASTW));
+    highContrast.cbSize = sizeof(highContrast);
+    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(highContrast), &highContrast, FALSE))
+        return highContrast.dwFlags & HCF_HIGHCONTRASTON;
+    return FALSE;
+}
+
+// https://codereview.stackexchange.com/questions/29198/random-string-generator-in-c
+static inline WCHAR* rand_string(WCHAR* str, size_t size)
+{
+    const WCHAR charset[] = L"abcdefghijklmnopqrstuvwxyz";
+    if (size) {
+        --size;
+        for (size_t n = 0; n < size; n++) {
+            int key = rand() % (int)((sizeof(charset) / sizeof(WCHAR)) - 1);
+            str[n] = charset[key];
+        }
+        str[size] = L'\0';
+    }
+    return str;
+}
 
 inline long long milliseconds_now() {
     LARGE_INTEGER s_frequency;
@@ -523,4 +545,19 @@ inline BOOL WINAPI PatchContextMenuOfNewMicrosoftIME(BOOL* bFound)
     }
     return TRUE;
 }
+
+extern UINT PleaseWaitTimeout;
+extern HHOOK PleaseWaitHook;
+extern HWND PleaseWaitHWND;
+extern void* PleaseWaitCallbackData;
+extern BOOL (*PleaseWaitCallbackFunc)(void* data);
+BOOL PleaseWait_UpdateTimeout(int timeout);
+VOID CALLBACK PleaseWait_TimerProc(HWND hWnd, UINT uMsg, UINT idEvent, DWORD dwTime);
+LRESULT CALLBACK PleaseWait_HookProc(int code, WPARAM wParam, LPARAM lParam);
+
+BOOL DownloadAndInstallWebView2Runtime();
+
+BOOL DownloadFile(LPCWSTR wszURL, DWORD dwSize, LPCWSTR wszPath);
+
+BOOL IsConnectedToInternet();
 #endif

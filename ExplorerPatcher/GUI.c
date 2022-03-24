@@ -3,7 +3,10 @@ DEFINE_GUID(LiveSetting_Property_GUID, 0xc12bcd8e, 0x2a8e, 0x4950, 0x8a, 0xe7, 0
 #include <oleacc.h>
 #include "GUI.h"
 
+TCHAR GUI_title[260];
+FILE* AuditFile = NULL;
 LANGID locale;
+WCHAR wszLanguage[MAX_PATH];
 void* GUI_FileMapping = NULL;
 DWORD GUI_FileSize = 0;
 BOOL g_darkModeEnabled = FALSE;
@@ -11,6 +14,100 @@ static void(*RefreshImmersiveColorPolicyState)() = NULL;
 static BOOL(*ShouldAppsUseDarkMode)() = NULL;
 DWORD dwTaskbarPosition = 3;
 BOOL gui_bOldTaskbar = TRUE;
+
+LSTATUS SetPolicy(HKEY hKey, LPCWSTR wszPolicyPath, LPCWSTR wszPolicyName, DWORD dwVal)
+{
+    WCHAR wszPath[MAX_PATH];
+    GetSystemDirectoryW(wszPath, MAX_PATH);
+    wcscat_s(wszPath, MAX_PATH, L"\\reg.exe");
+    WCHAR wszArguments[MAX_PATH];
+    if (dwVal)
+    {
+        swprintf_s(wszArguments, MAX_PATH, L"ADD \"%s\\%s\" /V %s /T REG_DWORD /D %d /F", (hKey == HKEY_LOCAL_MACHINE ? L"HKLM" : L"HKCU"), wszPolicyPath, wszPolicyName, dwVal);
+    }
+    else
+    {
+        swprintf_s(wszArguments, MAX_PATH, L"DELETE \"%s\\%s\" /V %s /F", (hKey == HKEY_LOCAL_MACHINE ? L"HKLM" : L"HKCU"), wszPolicyPath, wszPolicyName);
+    }
+    SHELLEXECUTEINFO ShExecInfo = { 0 };
+    ShExecInfo.cbSize = sizeof(SHELLEXECUTEINFO);
+    ShExecInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
+    ShExecInfo.hwnd = NULL;
+    ShExecInfo.lpVerb = L"runas";
+    ShExecInfo.lpFile = wszPath;
+    ShExecInfo.lpParameters = wszArguments;
+    ShExecInfo.lpDirectory = NULL;
+    ShExecInfo.nShow = SW_HIDE;
+    ShExecInfo.hInstApp = NULL;
+    if (ShellExecuteExW(&ShExecInfo) && ShExecInfo.hProcess)
+    {
+        WaitForSingleObject(ShExecInfo.hProcess, INFINITE);
+        DWORD dwExitCode = 0;
+        GetExitCodeProcess(ShExecInfo.hProcess, &dwExitCode);
+        CloseHandle(ShExecInfo.hProcess);
+    }
+    return ERROR_SUCCESS;
+}
+
+int GUI_DeleteWeatherFolder()
+{
+    WCHAR wszWorkFolder[MAX_PATH + 1];
+    ZeroMemory(wszWorkFolder, (MAX_PATH + 1) * sizeof(WCHAR));
+    SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT, wszWorkFolder);
+    wcscat_s(wszWorkFolder, MAX_PATH + 1, L"\\ExplorerPatcher\\ep_weather_host");
+    wszWorkFolder[wcslen(wszWorkFolder) + 1] = 0;
+    SHFILEOPSTRUCTW op;
+    ZeroMemory(&op, sizeof(SHFILEOPSTRUCTW));
+    op.wFunc = FO_DELETE;
+    op.pFrom = wszWorkFolder;
+    op.fFlags = FOF_NO_UI;
+    if (!SHFileOperationW(&op))
+    {
+        return IDOK;
+    }
+    else
+    {
+        if (op.fAnyOperationsAborted)
+        {
+            return IDCANCEL;
+        }
+        else
+        {
+            return IDABORT;
+        }
+    }
+}
+
+BOOL GUI_Internal_DeleteWeatherFolder(int* res)
+{
+    if (!FindWindowW(_T(EPW_WEATHER_CLASSNAME), NULL))
+    {
+        if (!*res)
+        {
+            if (PleaseWait_UpdateTimeout(3000))
+            {
+                *res = IDRETRY;
+            }
+            else
+            {
+                *res = IDABORT;
+                return FALSE;
+            }
+        }
+        else if (*res == IDRETRY)
+        {
+            *res = GUI_DeleteWeatherFolder();
+            if (*res != IDRETRY)
+            {
+                return FALSE;
+            }
+        }
+    }
+    else
+    {
+    }
+    return TRUE;
+}
 
 void PlayHelpMessage(GUI* _this)
 {
@@ -29,7 +126,7 @@ void PlayHelpMessage(GUI* _this)
         wszAccText,
         1000,
         L"Welcome to ExplorerPatcher. "
-        L"Selected page is: %s: %d out of %d. "
+        L"Selected page is: %s: %d of %d. "
         L"To switch pages, press the Left or Right arrow keys or press a number (%d to %d). "
         L"To select an item, press the Up or Down arrow keys or Shift+Tab and Tab. "
         L"To interact with the selected item, press Space or Return. "
@@ -90,15 +187,6 @@ LONG NTAPI OnVex(PEXCEPTION_POINTERS ExceptionInfo)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-BOOL IsHighContrast()
-{
-    HIGHCONTRASTW highContrast;
-    ZeroMemory(&highContrast, sizeof(HIGHCONTRASTW));
-    highContrast.cbSize = sizeof(highContrast);
-    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(highContrast), &highContrast, FALSE))
-        return highContrast.dwFlags & HCF_HIGHCONTRASTON;
-    return FALSE;
-}
 BOOL IsColorSchemeChangeMessage(LPARAM lParam)
 {
     BOOL is = FALSE;
@@ -109,7 +197,7 @@ BOOL IsColorSchemeChangeMessage(LPARAM lParam)
     return is;
 }
 
-LSTATUS GUI_RegSetValueExW(
+LSTATUS GUI_Internal_RegSetValueExW(
     HKEY       hKey,
     LPCWSTR    lpValueName,
     DWORD      Reserved,
@@ -302,14 +390,26 @@ LSTATUS GUI_RegSetValueExW(
     }
     else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_PeopleBand"))
     {
+        DWORD dwData = 0, dwSize = sizeof(DWORD);
+        RegGetValueW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced\\People", L"PeopleBand", RRF_RT_DWORD, NULL, &dwData, &dwSize);
+        if ((dwData && *(DWORD*)lpData) || (!dwData && !*(DWORD*)lpData))
+        {
+            return ERROR_SUCCESS;
+        }
         PostMessageW(FindWindowW(L"Shell_TrayWnd", NULL), WM_COMMAND, 435, 0);
+        DWORD dwProcessId = 0;
+        GetWindowThreadProcessId(FindWindowW(L"Shell_TrayWnd", NULL), &dwProcessId);
+        if (dwProcessId)
+        {
+            AllowSetForegroundWindow(dwProcessId);
+        }
         return ERROR_SUCCESS;
     }
     else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_Start_MaximumFrequentApps"))
     {
         RegSetKeyValueW(
             HKEY_CURRENT_USER,
-            TEXT(REGPATH),
+            TEXT(REGPATH_OLD),
             L"Start_MaximumFrequentApps",
             dwType,
             lpData,
@@ -317,9 +417,144 @@ LSTATUS GUI_RegSetValueExW(
         );
         return RegSetValueExW(hKey, L"Start_MaximumFrequentApps", 0, dwType, lpData, cbData);
     }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_StartDocked_DisableRecommendedSection"))
+    {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            TEXT(REGPATH_OLD),
+            L"StartDocked_DisableRecommendedSection",
+            dwType,
+            lpData,
+            cbData
+        );
+        return RegSetValueExW(hKey, L"StartDocked_DisableRecommendedSection", 0, dwType, lpData, cbData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_StartUI_EnableRoundedCorners"))
+    {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            TEXT(REGPATH_OLD),
+            L"StartUI_EnableRoundedCorners",
+            dwType,
+            lpData,
+            cbData
+        );
+        return RegSetValueExW(hKey, L"StartUI_EnableRoundedCorners", 0, dwType, lpData, cbData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_StartUI_ShowMoreTiles"))
+    {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            TEXT(REGPATH_OLD),
+            L"StartUI_ShowMoreTiles",
+            dwType,
+            lpData,
+            cbData
+        );
+        return RegSetValueExW(hKey, L"StartUI_ShowMoreTiles", 0, dwType, lpData, cbData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_ForceStartSize"))
+    {
+        return SetPolicy(HKEY_CURRENT_USER, L"SOFTWARE\\Policies\\Microsoft\\Windows\\Explorer", L"ForceStartSize", *(DWORD*)lpData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_NoStartMenuMorePrograms"))
+    {
+        return SetPolicy(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer", L"NoStartMenuMorePrograms", *(DWORD*)lpData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_DisableRoundedCorners"))
+    {
+        return RegisterDWMService(*(DWORD*)lpData, 0);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_RegisterAsShellExtension"))
+    {
+        HKEY hKey2 = NULL;
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            L"Software\\Classes\\CLSID\\" _T(EP_CLSID) L"\\InprocServer32",
+            REG_OPTION_NON_VOLATILE,
+            KEY_READ | KEY_WOW64_64KEY,
+            &hKey2
+        );
+        WCHAR wszArgs[MAX_PATH];
+        if (((hKey2 == NULL || hKey2 == INVALID_HANDLE_VALUE) && !*(DWORD*)lpData) || !(hKey2 == NULL || hKey2 == INVALID_HANDLE_VALUE) && (*(DWORD*)lpData))
+        {
+            RegCloseKey(hKey2);
+            return ERROR_SUCCESS;
+        }
+        if (!(hKey2 == NULL || hKey2 == INVALID_HANDLE_VALUE))
+        {
+            RegCloseKey(hKey2);
+        }
+        if (*(DWORD*)lpData)
+        {
+            wszArgs[0] = L'\"';
+            SHGetFolderPathW(NULL, SPECIAL_FOLDER, NULL, SHGFP_TYPE_CURRENT, wszArgs + 1);
+            wcscat_s(wszArgs, MAX_PATH, _T(APP_RELATIVE_PATH) L"\\" _T(PRODUCT_NAME) L".amd64.dll\"");
+        }
+        else
+        {
+            wszArgs[0] = L'/';
+            wszArgs[1] = L'u';
+            wszArgs[2] = L' ';
+            wszArgs[3] = L'"';
+            SHGetFolderPathW(NULL, SPECIAL_FOLDER, NULL, SHGFP_TYPE_CURRENT, wszArgs + 4);
+            wcscat_s(wszArgs, MAX_PATH, _T(APP_RELATIVE_PATH) L"\\" _T(PRODUCT_NAME) L".amd64.dll\"");
+        }
+        wprintf(L"%s\n", wszArgs);
+        WCHAR wszApp[MAX_PATH * 2];
+        GetSystemDirectoryW(wszApp, MAX_PATH * 2);
+        wcscat_s(wszApp, MAX_PATH * 2, L"\\regsvr32.exe");
+        wprintf(L"%s\n", wszApp);
+        SHELLEXECUTEINFOW sei;
+        ZeroMemory(&sei, sizeof(SHELLEXECUTEINFOW));
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.hwnd = NULL;
+        sei.hInstApp = NULL;
+        sei.lpVerb = L"runas";
+        sei.lpFile = wszApp;
+        sei.lpParameters = wszArgs;
+        sei.hwnd = NULL;
+        sei.nShow = SW_NORMAL;
+        if (ShellExecuteExW(&sei) && sei.hProcess)
+        {
+            WaitForSingleObject(sei.hProcess, INFINITE);
+            DWORD dwExitCode = 0;
+            if (GetExitCodeProcess(sei.hProcess, &dwExitCode) && !dwExitCode)
+            {
+
+            }
+            else
+            {
+
+            }
+            CloseHandle(sei.hProcess);
+        }
+        else
+        {
+            DWORD dwError = GetLastError();
+            if (dwError == ERROR_CANCELLED)
+            {
+            }
+        }
+        return ERROR_SUCCESS;
+     }
 }
 
-LSTATUS GUI_RegQueryValueExW(
+LSTATUS GUI_RegSetValueExW(
+    HKEY       hKey,
+    LPCWSTR    lpValueName,
+    DWORD      Reserved,
+    DWORD      dwType,
+    const BYTE* lpData,
+    DWORD      cbData
+)
+{
+    LSTATUS lRes = GUI_Internal_RegSetValueExW(hKey, lpValueName, Reserved, dwType, lpData, cbData);
+    return lRes;
+}
+
+LSTATUS GUI_Internal_RegQueryValueExW(
     HKEY    hKey,
     LPCWSTR lpValueName,
     LPDWORD lpReserved,
@@ -411,13 +646,155 @@ LSTATUS GUI_RegQueryValueExW(
     }
     else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_PeopleBand"))
     {
-        return RegQueryValueExW(hKey, L"PeopleBand", lpReserved, lpType, lpData, lpcbData);
+        return RegGetValueW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced\\People", L"PeopleBand", RRF_RT_DWORD, NULL, lpData, lpcbData);
     }
     else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_Start_MaximumFrequentApps"))
     {
         return RegQueryValueExW(hKey, L"Start_MaximumFrequentApps", lpReserved, lpType, lpData, lpcbData);
     }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_StartDocked_DisableRecommendedSection"))
+    {
+        return RegQueryValueExW(hKey, L"StartDocked_DisableRecommendedSection", lpReserved, lpType, lpData, lpcbData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_StartUI_EnableRoundedCorners"))
+    {
+        return RegQueryValueExW(hKey, L"StartUI_EnableRoundedCorners", lpReserved, lpType, lpData, lpcbData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_StartUI_ShowMoreTiles"))
+    {
+        return RegQueryValueExW(hKey, L"StartUI_ShowMoreTiles", lpReserved, lpType, lpData, lpcbData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_ForceStartSize"))
+    {
+        return RegGetValueW(HKEY_CURRENT_USER, L"SOFTWARE\\Policies\\Microsoft\\Windows\\Explorer", L"ForceStartSize", RRF_RT_DWORD, NULL, lpData, lpcbData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_NoStartMenuMorePrograms"))
+    {
+        return RegGetValueW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer", L"NoStartMenuMorePrograms", RRF_RT_DWORD, NULL, lpData, lpcbData);
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_DisableRoundedCorners"))
+    {
+        HANDLE h_exists = CreateEventW(NULL, FALSE, FALSE, _T(EP_DWM_EVENTNAME));
+        if (h_exists)
+        {
+            if (GetLastError() == ERROR_ALREADY_EXISTS)
+            {
+                *(DWORD*)lpData = 1;
+            }
+            else
+            {
+                *(DWORD*)lpData = 0;
+            }
+            CloseHandle(h_exists);
+        }
+        else
+        {
+            if (GetLastError() == ERROR_ACCESS_DENIED)
+            {
+                *(DWORD*)lpData = 1;
+            }
+            else
+            {
+                *(DWORD*)lpData = 0;
+            }
+        }
+        return ERROR_SUCCESS;
+    }
+    else if (!wcscmp(lpValueName, L"Virtualized_" _T(EP_CLSID) L"_RegisterAsShellExtension"))
+    {
+        HKEY hKey2 = NULL;
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            L"Software\\Classes\\CLSID\\" _T(EP_CLSID) L"\\InprocServer32",
+            REG_OPTION_NON_VOLATILE,
+            KEY_READ | KEY_WOW64_64KEY,
+            &hKey2
+        );
+        if (hKey2 == NULL || hKey2 == INVALID_HANDLE_VALUE)
+        {
+            *(DWORD*)lpData = 0;
+        }
+        else
+        {
+            *(DWORD*)lpData = 1;
+            RegCloseKey(hKey2);
+        }
+    }
 }
+
+LSTATUS GUI_RegCreateKeyExW(
+    HKEY                        hKey,
+    LPCWSTR                     lpSubKey,
+    DWORD                       Reserved,
+    LPWSTR                      lpClass,
+    DWORD                       dwOptions,
+    REGSAM                      samDesired,
+    const LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+    PHKEY                       phkResult,
+    LPDWORD                     lpdwDisposition
+)
+{
+    LSTATUS lRes = RegCreateKeyExW(hKey, lpSubKey, Reserved, lpClass, dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);
+    if (AuditFile)
+    {
+        fwprintf(AuditFile, L"[%s\\%s]\n", hKey == HKEY_CURRENT_USER ? L"HKEY_CURRENT_USER" : L"HKEY_LOCAL_MACHINE", lpSubKey);
+    }
+    return lRes;
+}
+
+LSTATUS GUI_RegOpenKeyExW(
+    HKEY    hKey,
+    LPCWSTR lpSubKey,
+    DWORD   ulOptions,
+    REGSAM  samDesired,
+    PHKEY   phkResult
+)
+{
+    LSTATUS lRes = RegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult);
+    if (AuditFile)
+    {
+        fwprintf(AuditFile, L"[%s%s\\%s]\n", (*phkResult == NULL || *phkResult == INVALID_HANDLE_VALUE) ? L"-" : L"", hKey == HKEY_CURRENT_USER ? L"HKEY_CURRENT_USER" : L"HKEY_LOCAL_MACHINE", lpSubKey);
+        WCHAR wszDefVal[MAX_PATH];
+        ZeroMemory(wszDefVal, MAX_PATH);
+        DWORD dwLen = MAX_PATH;
+        RegGetValueW(hKey, lpSubKey, NULL, RRF_RT_REG_SZ, NULL, wszDefVal, &dwLen);
+        if (wszDefVal[0])
+        {
+            fwprintf(AuditFile, L"@=\"%s\"\n", wszDefVal);
+        }
+        else
+        {
+            fwprintf(AuditFile, L"@=\"\"\n");
+        }
+    }
+    return lRes;
+}
+
+LSTATUS GUI_RegQueryValueExW(
+    HKEY    hKey,
+    LPCWSTR lpValueName,
+    LPDWORD lpReserved,
+    LPDWORD lpType,
+    LPBYTE  lpData,
+    LPDWORD lpcbData
+)
+{
+    DWORD dwSize = lpcbData ? *(DWORD*)lpcbData : sizeof(DWORD);
+    LSTATUS lRes = GUI_Internal_RegQueryValueExW(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
+    if (AuditFile)
+    {
+        if (dwSize != sizeof(DWORD))
+        {
+            fwprintf(AuditFile, L"%s\"%s\"=\"%s\"\n", (lpValueName && wcsncmp(lpValueName, L"Virtualized_" _T(EP_CLSID), 50)) ? L"" : L";", lpValueName, lpData);
+        }
+        else
+        {
+            fwprintf(AuditFile, L"%s\"%s\"=dword:%08x\n", (lpValueName && wcsncmp(lpValueName, L"Virtualized_" _T(EP_CLSID), 50)) ? L"" : L";", lpValueName, *(DWORD*)lpData);
+        }
+    }
+    return lRes;
+}
+
 
 static HRESULT GUI_AboutProc(
     HWND hwnd,
@@ -555,7 +932,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
     {
         HRSRC hRscr = FindResource(
             hModule,
-            MAKEINTRESOURCE(IDR_REGISTRY1),
+            IsWindows11() ? MAKEINTRESOURCE(IDR_REGISTRY1) : MAKEINTRESOURCE(IDR_REGISTRY2),
             RT_RCDATA
         );
         if (!hRscr)
@@ -577,22 +954,19 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
         );
     }
 
+    UINT dpiX = 0, dpiY = 0;
+    HRESULT hr = GetDpiForMonitor(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), MDT_DEFAULT, &dpiX, &dpiY);
     LOGFONT logFont;
     memset(&logFont, 0, sizeof(logFont));
     NONCLIENTMETRICS ncm;
     ncm.cbSize = sizeof(NONCLIENTMETRICS);
-    SystemParametersInfoW(
-        SPI_GETNONCLIENTMETRICS,
-        sizeof(NONCLIENTMETRICS),
-        &ncm,
-        0
-    );
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &ncm, 0, dpiX);
     logFont = ncm.lfCaptionFont;
-    logFont.lfHeight = GUI_CAPTION_FONT_SIZE * dy;
+    //logFont.lfHeight = GUI_CAPTION_FONT_SIZE * dy;
     //logFont.lfWeight = FW_BOLD;
     HFONT hFontCaption = CreateFontIndirect(&logFont);
     logFont = ncm.lfMenuFont;
-    logFont.lfHeight = GUI_TITLE_FONT_SIZE * dy;
+    //logFont.lfHeight = GUI_TITLE_FONT_SIZE * dy;
     HFONT hFontTitle = CreateFontIndirect(&logFont);
     logFont.lfWeight = FW_REGULAR;
     logFont.lfUnderline = 1;
@@ -601,7 +975,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
     logFont.lfUnderline = 0;
     HFONT hFontRegular = CreateFontIndirect(&logFont);
     logFont.lfWeight = FW_DEMIBOLD;
-    logFont.lfHeight = GUI_SECTION_FONT_SIZE * dy;
+    //logFont.lfHeight = GUI_SECTION_FONT_SIZE * dy;
     HFONT hFontSection = CreateFontIndirect(&logFont);
     logFont.lfUnderline = 1;
     HFONT hFontSectionSel = CreateFontIndirect(&logFont);
@@ -631,13 +1005,19 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
             hdcPaint = GetDC(hwnd);
         }
 
-        if (!IsThemeActive() && hDC)
+        if ((!IsThemeActive() || IsHighContrast()) && hDC)
         {
-            COLORREF oldcr = SetBkColor(hdcPaint, GetSysColor(COLOR_MENU));
+            COLORREF oldcr = SetBkColor(hdcPaint, GetSysColor(COLOR_3DFACE));
             ExtTextOutW(hdcPaint, 0, 0, ETO_OPAQUE, &rc, L"", 0, 0);
             SetBkColor(hdcPaint, oldcr);
             SetTextColor(hdcPaint, GetSysColor(COLOR_WINDOWTEXT));
             SetBkMode(hdcPaint, TRANSPARENT);
+        }
+        else if ((!IsWindows11() || IsDwmExtendFrameIntoClientAreaBrokenInThisBuild()) && hDC)
+        {
+            COLORREF oldcr = SetBkColor(hdcPaint, g_darkModeEnabled ? RGB(0, 0, 0) : RGB(255, 255, 255));
+            ExtTextOutW(hdcPaint, 0, 0, ETO_OPAQUE, &rc, L"", 0, 0);
+            SetBkColor(hdcPaint, oldcr);
         }
 
         BOOL bResetLastHeading = TRUE;
@@ -651,6 +1031,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
         wchar_t* lastHeading = calloc(MAX_LINE_LENGTH, sizeof(wchar_t));
         while ((numChRd = getline(&line, &bufsiz, f)) != -1)
         {
+            hOldFont = NULL;
             if (currentSection == _this->section)
             {
                 bWasSpecifiedSectionValid = TRUE;
@@ -663,8 +1044,8 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
             }
             if (strcmp(line, "Windows Registry Editor Version 5.00\r\n") && 
                 strcmp(line, "\r\n") && 
-                (currentSection == -1 || currentSection == _this->section || !strncmp(line, ";T ", 3) || !strncmp(line, ";f", 2)) &&
-                !(!IsThemeActive() && !strncmp(line, ";M ", 3))
+                (currentSection == -1 || currentSection == _this->section || !strncmp(line, ";T ", 3) || !strncmp(line, ";f", 2) || AuditFile) &&
+                !((!IsThemeActive() || IsHighContrast() || !IsWindows11() || IsDwmExtendFrameIntoClientAreaBrokenInThisBuild()) && !strncmp(line, ";M ", 3))
                 )
             {
 #ifndef USE_PRIVATE_INTERFACES
@@ -754,7 +1135,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                     }
                     if (hDC)
                     {
-                        if (IsThemeActive())
+                        if (IsThemeActive() && !IsHighContrast())
                         {
                             DrawThemeTextEx(
                                 _this->hTheme,
@@ -841,6 +1222,12 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
 #endif
                                 );
                         }
+
+                        p = strstr(line, "%OSVERSIONSTRING%");
+                        if (p)
+                        {
+                            sprintf_s(p, MAX_PATH, "%d.%d.%d.%d.", global_rovi.dwMajorVersion, global_rovi.dwMinorVersion, global_rovi.dwBuildNumber, global_ubr);
+                        }
                     }
                     ZeroMemory(text, (MAX_LINE_LENGTH + 3) * sizeof(wchar_t));
                     MultiByteToWideChar(
@@ -851,6 +1238,42 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         text,
                         MAX_LINE_LENGTH
                     );
+                    if (!wcsncmp(text, L"%WEATHERLASTUPDATETEXT%", 23))
+                    {
+                        BOOL bOk = FALSE;
+                        DWORD bIsWeatherEnabled = 0, dwSize = sizeof(DWORD);
+                        GUI_Internal_RegQueryValueExW(NULL, L"Virtualized_" _T(EP_CLSID) L"_PeopleBand", NULL, NULL, &bIsWeatherEnabled, &dwSize);
+                        if (bIsWeatherEnabled)
+                        {
+                            IEPWeather* epw = NULL;
+                            if (SUCCEEDED(CoCreateInstance(&CLSID_EPWeather, NULL, CLSCTX_LOCAL_SERVER, &IID_IEPWeather, &epw)) && epw)
+                            {
+                                SYSTEMTIME stLastUpdate;
+                                ZeroMemory(&stLastUpdate, sizeof(SYSTEMTIME));
+                                if (SUCCEEDED(epw->lpVtbl->GetLastUpdateTime(epw, &stLastUpdate)))
+                                {
+                                    WCHAR wszWeatherLanguage[10];
+                                    ZeroMemory(wszWeatherLanguage, 10);
+                                    dwSize = sizeof(WCHAR) * 10;
+                                    RegGetValueW(HKEY_CURRENT_USER, _T(REGPATH), L"WeatherLanguage", RRF_RT_REG_SZ, NULL, wszWeatherLanguage, &dwSize);
+                                    WCHAR wszDate[MAX_PATH];
+                                    ZeroMemory(wszDate, sizeof(WCHAR) * MAX_PATH);
+                                    if (GetDateFormatEx(wszWeatherLanguage[0] ? wszWeatherLanguage : wszLanguage, DATE_AUTOLAYOUT | DATE_LONGDATE, &stLastUpdate, NULL, wszDate, MAX_PATH, NULL))
+                                    {
+                                        WCHAR wszTime[MAX_PATH];
+                                        ZeroMemory(wszTime, sizeof(WCHAR) * MAX_PATH);
+                                        if (GetTimeFormatEx(wszWeatherLanguage[0] ? wszWeatherLanguage : wszLanguage, TIME_NOSECONDS, &stLastUpdate, NULL, wszTime, MAX_PATH))
+                                        {
+                                            bOk = TRUE;
+                                            swprintf_s(text, MAX_LINE_LENGTH, L"Last updated on: %s, %s.", wszDate, wszTime);
+                                        }
+                                    }
+                                }
+                                epw->lpVtbl->Release(epw);
+                            }
+                        }
+                        if (!bOk) continue;
+                    }
                     if (bResetLastHeading)
                     {
                         wcscpy_s(lastHeading, MAX_LINE_LENGTH, text);
@@ -918,7 +1341,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                             if (p)
                             {
                                 p--;
-                                if (p == L' ')
+                                if (*p == L' ')
                                 {
                                     *p = 0;
                                 }
@@ -939,9 +1362,9 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         if (!strncmp(line, ";u ", 3) && tabOrder == _this->tabOrder)
                         {
                             bTabOrderHit = TRUE;
-                            if (!IsThemeActive())
+                            if (!IsThemeActive() || IsHighContrast())
                             {
-                                cr = SetTextColor(hdcPaint, GetSysColor(COLOR_HIGHLIGHTTEXT));
+                                cr = SetTextColor(hdcPaint, GetSysColor(COLOR_HIGHLIGHT));
                             }
                             else
                             {
@@ -992,7 +1415,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         {
                             dwMaxWidth = rcNew.right - rcNew.left + 50 * dx;
                         }
-                        if (IsThemeActive())
+                        if (IsThemeActive() && !IsHighContrast())
                         {
                             DrawThemeTextEx(
                                 _this->hTheme,
@@ -1018,7 +1441,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         }
                         if (!strncmp(line, ";u ", 3) && tabOrder == _this->tabOrder)
                         {
-                            if (!IsThemeActive())
+                            if (!IsThemeActive() || IsHighContrast())
                             {
                                 SetTextColor(hdcPaint, cr);
                             }
@@ -1053,6 +1476,11 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 HWND hShellTrayWnd = FindWindowW(L"Shell_TrayWnd", NULL);
                                 if (hShellTrayWnd)
                                 {
+                                    HANDLE hEvent = NULL;
+                                    if (GetAsyncKeyState(VK_SHIFT))
+                                    {
+                                        hEvent = CreateEventW(NULL, FALSE, FALSE, _T(EP_SETUP_EVENTNAME));
+                                    }
                                     WCHAR wszPath[MAX_PATH];
                                     ZeroMemory(wszPath, MAX_PATH * sizeof(WCHAR));
                                     PDWORD_PTR res = -1;
@@ -1093,6 +1521,10 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                     wcscat_s(wszPath, MAX_PATH, L"\\explorer.exe");
                                     Sleep(1000);
                                     GUI_RegSetValueExW(NULL, L"Virtualized_" _T(EP_CLSID) L"_TaskbarPosition", NULL, NULL, &dwTaskbarPosition, NULL);
+                                    if (hEvent)
+                                    {
+                                        CloseHandle(hEvent);
+                                    }
                                     ShellExecuteW(
                                         NULL,
                                         L"open",
@@ -1153,27 +1585,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                         KEY_READ | KEY_WOW64_64KEY,
                                         &hKey
                                     );
-                                    if (hKey == NULL || hKey == INVALID_HANDLE_VALUE)
-                                    {
-                                        buffer = malloc(cbRscr);
-                                        if (buffer)
-                                        {
-                                            memcpy(buffer, pRscr, cbRscr);
-                                            char* p1 = strstr(buffer, "[-HKEY_LOCAL_MACHINE\\Software\\Classes\\CLSID\\" EP_CLSID "\\InprocServer32]");
-                                            if (p1) p1[0] = ';';
-                                            char* p2 = strstr(buffer, ";d Register as shell extension");
-                                            if (p2) memcpy(p2, ";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;", 70);
-                                        }
-                                        else
-                                        {
-                                            RegCloseKey(hKey);
-                                            hKey = NULL;
-                                        }
-                                    }
-                                    if (!buffer)
-                                    {
-                                        buffer = pRscr;
-                                    }
+                                    buffer = pRscr;
                                     DWORD dwNumberOfBytesWritten = 0;
                                     if (WriteFile(
                                         hFile,
@@ -1184,102 +1596,131 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                     ))
                                     {
                                         CloseHandle(hFile);
+                                        DWORD dwOldTaskbarOld = 0, dwOldTaskbar = 0, dwSize = sizeof(DWORD);
+                                        RegGetValueW(HKEY_CURRENT_USER, _T(REGPATH), L"OldTaskbar", RRF_RT_DWORD, NULL, &dwOldTaskbarOld, &dwSize);
+                                        RegSetKeyValueW(HKEY_CURRENT_USER, _T(REGPATH), L"OldTaskbar", REG_DWORD, &dwOldTaskbar, sizeof(DWORD));
 
-                                        DWORD dwError = 1;
-                                        if (hKey == NULL || hKey == INVALID_HANDLE_VALUE)
+                                        DWORD dwError = 0;
+                                        // https://stackoverflow.com/questions/50298722/win32-launching-a-highestavailable-child-process-as-a-normal-user-process
+                                        if (pvRtlQueryElevationFlags = GetProcAddress(GetModuleHandleW(L"ntdll"), "RtlQueryElevationFlags"))
                                         {
-                                            dwError = 0;
-                                            // https://stackoverflow.com/questions/50298722/win32-launching-a-highestavailable-child-process-as-a-normal-user-process
-                                            if (pvRtlQueryElevationFlags = GetProcAddress(GetModuleHandleW(L"ntdll"), "RtlQueryElevationFlags"))
+                                            PVOID pv;
+                                            if (pv = AddVectoredExceptionHandler(TRUE, OnVex))
                                             {
-                                                PVOID pv;
-                                                if (pv = AddVectoredExceptionHandler(TRUE, OnVex))
+                                                CONTEXT ctx;
+                                                ZeroMemory(&ctx, sizeof(CONTEXT));
+                                                ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                                                ctx.Dr7 = 0x404;
+                                                ctx.Dr1 = (ULONG_PTR)pvRtlQueryElevationFlags;
+
+                                                if (SetThreadContext(GetCurrentThread(), &ctx))
                                                 {
-                                                    CONTEXT ctx;
-                                                    ZeroMemory(&ctx, sizeof(CONTEXT));
-                                                    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-                                                    ctx.Dr7 = 0x404;
-                                                    ctx.Dr1 = (ULONG_PTR)pvRtlQueryElevationFlags;
-
-                                                    if (SetThreadContext(GetCurrentThread(), &ctx))
+                                                    WCHAR wszExec[MAX_PATH * 2];
+                                                    ZeroMemory(wszExec, MAX_PATH * 2 * sizeof(WCHAR));
+                                                    wszExec[0] = L'"';
+                                                    GetWindowsDirectoryW(wszExec + 1, MAX_PATH);
+                                                    wcscat_s(wszExec, MAX_PATH * 2, L"\\regedit.exe\" \"");
+                                                    wcscat_s(wszExec, MAX_PATH * 2, wszPath);
+                                                    wcscat_s(wszExec, MAX_PATH * 2, L"\"");
+                                                    STARTUPINFO si;
+                                                    ZeroMemory(&si, sizeof(STARTUPINFO));
+                                                    si.cb = sizeof(STARTUPINFO);
+                                                    PROCESS_INFORMATION pi;
+                                                    ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
+                                                    wprintf(L"%s\n", wszExec);
+                                                    if (CreateProcessW(NULL, wszExec, 0, 0, 0, 0, 0, 0, &si, &pi))
                                                     {
-                                                        WCHAR wszExec[MAX_PATH * 2];
-                                                        ZeroMemory(wszExec, MAX_PATH * 2 * sizeof(WCHAR));
-                                                        wszExec[0] = L'"';
-                                                        GetWindowsDirectoryW(wszExec + 1, MAX_PATH);
-                                                        wcscat_s(wszExec, MAX_PATH * 2, L"\\regedit.exe\" \"");
-                                                        wcscat_s(wszExec, MAX_PATH * 2, wszPath);
-                                                        wcscat_s(wszExec, MAX_PATH * 2, L"\"");
-                                                        STARTUPINFO si;
-                                                        ZeroMemory(&si, sizeof(STARTUPINFO));
-                                                        si.cb = sizeof(STARTUPINFO);
-                                                        PROCESS_INFORMATION pi;
-                                                        ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
-                                                        wprintf(L"%s\n", wszExec);
-                                                        if (CreateProcessW(NULL, wszExec, 0, 0, 0, 0, 0, 0, &si, &pi))
-                                                        {
-                                                            CloseHandle(pi.hThread);
-                                                            //CloseHandle(pi.hProcess);
-                                                        }
-                                                        else
-                                                        {
-                                                            dwError = GetLastError();
-                                                        }
-
-                                                        ctx.Dr7 = 0x400;
-                                                        ctx.Dr1 = 0;
-                                                        SetThreadContext(GetCurrentThread(), &ctx);
-
-                                                        if (pi.hProcess)
-                                                        {
-                                                            WaitForSingleObject(pi.hProcess, INFINITE);
-                                                            DWORD dwExitCode = 0;
-                                                            GetExitCodeProcess(pi.hProcess, &dwExitCode);
-                                                            CloseHandle(pi.hProcess);
-                                                        }
+                                                        CloseHandle(pi.hThread);
+                                                        //CloseHandle(pi.hProcess);
                                                     }
                                                     else
                                                     {
                                                         dwError = GetLastError();
                                                     }
-                                                    RemoveVectoredExceptionHandler(pv);
+
+                                                    ctx.Dr7 = 0x400;
+                                                    ctx.Dr1 = 0;
+                                                    SetThreadContext(GetCurrentThread(), &ctx);
+
+                                                    if (pi.hProcess)
+                                                    {
+                                                        WaitForSingleObject(pi.hProcess, INFINITE);
+                                                        DWORD dwExitCode = 0;
+                                                        GetExitCodeProcess(pi.hProcess, &dwExitCode);
+                                                        CloseHandle(pi.hProcess);
+                                                    }
                                                 }
                                                 else
                                                 {
                                                     dwError = GetLastError();
                                                 }
+                                                RemoveVectoredExceptionHandler(pv);
                                             }
                                             else
                                             {
                                                 dwError = GetLastError();
                                             }
                                         }
-                                        if (dwError)
+                                        else
                                         {
-                                            SHELLEXECUTEINFO ShExecInfo = { 0 };
-                                            ShExecInfo.cbSize = sizeof(SHELLEXECUTEINFO);
-                                            ShExecInfo.fMask = SEE_MASK_NOCLOSEPROCESS;
-                                            ShExecInfo.hwnd = NULL;
-                                            ShExecInfo.lpVerb = NULL;
-                                            ShExecInfo.lpFile = wszPath;
-                                            ShExecInfo.lpParameters = L"";
-                                            ShExecInfo.lpDirectory = NULL;
-                                            ShExecInfo.nShow = SW_SHOW;
-                                            ShExecInfo.hInstApp = NULL;
-                                            ShellExecuteExW(&ShExecInfo);
-                                            WaitForSingleObject(ShExecInfo.hProcess, INFINITE);
-                                            DWORD dwExitCode = 0;
-                                            GetExitCodeProcess(ShExecInfo.hProcess, &dwExitCode);
-                                            CloseHandle(ShExecInfo.hProcess);
+                                            dwError = GetLastError();
                                         }
+
+                                        dwSize = sizeof(DWORD);
+                                        RegGetValueW(HKEY_CURRENT_USER, _T(REGPATH), L"OldTaskbar", RRF_RT_DWORD, NULL, &dwOldTaskbar, &dwSize);
+                                        if (dwOldTaskbar == 1)
+                                        {
+                                            FILE* vf = NULL;
+                                            _wfopen_s(&vf, wszPath, L"r");
+                                            if (vf)
+                                            {
+                                                char* line2 = malloc(MAX_LINE_LENGTH * sizeof(char));
+                                                if (line2)
+                                                {
+                                                    int numChRd2 = 0;
+                                                    size_t bufsiz2 = MAX_LINE_LENGTH;
+                                                    while ((numChRd2 = getline(&line2, &bufsiz2, vf)) != -1)
+                                                    {
+                                                        if (!strncmp(line2, ";\"Virtualized_" EP_CLSID, 52))
+                                                        {
+                                                            DWORD dwVal = 0;
+                                                            WCHAR wszName[MAX_PATH];
+                                                            ZeroMemory(wszName, MAX_PATH * sizeof(wchar_t));
+                                                            MultiByteToWideChar(
+                                                                CP_UTF8,
+                                                                MB_PRECOMPOSED,
+                                                                line2 + 2,
+                                                                numChRd2 - 2,
+                                                                wszName,
+                                                                MAX_PATH
+                                                            );
+                                                            wchar_t* ddd = wcschr(wszName, L'=');
+                                                            if (ddd) *ddd = 0;
+                                                            wchar_t* ppp = wcschr(wszName, L'"');
+                                                            if (ppp) *ppp = 0;
+                                                            if (!wcsncmp(ddd + 1, L"dword:", 6))
+                                                            {
+                                                                wchar_t* xxx = wcschr(ddd + 1, L':');
+                                                                xxx++;
+                                                                dwVal = wcstol(xxx, NULL, 16);
+                                                                wprintf(L"%s %d\n", wszName, dwVal);
+                                                                GUI_RegSetValueExW(NULL, wszName, 0, RRF_RT_DWORD, &dwVal, sizeof(DWORD));
+                                                            }
+                                                        }
+                                                    }
+                                                    free(line2);
+                                                }
+                                                fclose(vf);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            RegSetKeyValueW(HKEY_CURRENT_USER, _T(REGPATH), L"OldTaskbar", REG_DWORD, &dwOldTaskbarOld, sizeof(DWORD));
+                                        }
+
                                         _this->tabOrder = 0;
                                         InvalidateRect(hwnd, NULL, FALSE);
                                         DeleteFileW(wszPath);
-                                    }
-                                    if (hKey == NULL || hKey == INVALID_HANDLE_VALUE)
-                                    {
-                                        RegCloseKey(hKey);
-                                        free(buffer);
                                     }
                                 }
                             }
@@ -1355,6 +1796,445 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                     NULL
                                 );
                             }
+                            else if (!strncmp(line + 1, "export", 6))
+                            {
+                                WCHAR title[MAX_PATH];
+                                WCHAR filter[MAX_PATH];
+                                WCHAR wszRegedit[MAX_PATH];
+                                GetWindowsDirectoryW(wszRegedit, MAX_PATH);
+                                wcscat_s(wszRegedit, MAX_PATH, L"\\regedit.exe");
+                                HMODULE hRegedit = LoadLibraryExW(wszRegedit, NULL, LOAD_LIBRARY_AS_DATAFILE);
+                                if (hRegedit)
+                                {
+                                    LoadStringW(hRegedit, 301, title, MAX_PATH);
+                                    LoadStringW(hRegedit, 302, filter, MAX_PATH);
+                                    unsigned int j = 0;
+                                    for (unsigned int i = 0; i < MAX_PATH; ++i)
+                                    {
+                                        if (filter[i] == L'#')
+                                        {
+                                            filter[i] = L'\0';
+                                            j++;
+                                            if (j == 2)
+                                            {
+                                                filter[i + 1] = L'\0';
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    FreeLibrary(hRegedit);
+                                }
+                                else
+                                {
+                                    wcscpy_s(title, MAX_PATH, L"Export settings");
+                                    wcscpy_s(filter, MAX_PATH, L"Registration Files (*.reg)\0*.reg\0\0");
+                                }
+                                WCHAR wszPath[MAX_PATH];
+                                ZeroMemory(wszPath, MAX_PATH * sizeof(WCHAR));
+                                DWORD dwLeftMost = 0;
+                                DWORD dwSecondLeft = 0;
+                                DWORD dwSecondRight = 0;
+                                DWORD dwRightMost = 0;
+                                QueryVersionInfo(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE), VS_VERSION_INFO, &dwLeftMost, &dwSecondLeft, &dwSecondRight, &dwRightMost);
+                                swprintf_s(wszPath, MAX_PATH, _T(PRODUCT_NAME) L"_%d.%d.%d.%d.reg", dwLeftMost, dwSecondLeft, dwSecondRight, dwRightMost);
+                                OPENFILENAMEW ofn;
+                                ZeroMemory(&ofn, sizeof(OPENFILENAMEW));
+                                ofn.lStructSize = sizeof(OPENFILENAMEW);
+                                ofn.hwndOwner = hwnd;
+                                ofn.hInstance = GetModuleHandleW(NULL);
+                                ofn.lpstrFilter = filter;
+                                ofn.lpstrCustomFilter = NULL;
+                                ofn.nMaxCustFilter = 0;
+                                ofn.nFilterIndex = 1;
+                                ofn.lpstrFile = wszPath;
+                                ofn.nMaxFile = MAX_PATH;
+                                ofn.lpstrFileTitle = NULL;
+                                ofn.nMaxFileTitle = 0;
+                                ofn.lpstrInitialDir = NULL;
+                                ofn.lpstrTitle = title;
+                                ofn.Flags = OFN_DONTADDTORECENT | OFN_CREATEPROMPT | OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT;
+                                ofn.nFileOffset = 0;
+                                ofn.nFileExtension = 0;
+                                ofn.lpstrDefExt = L"reg";
+                                ofn.lCustData = NULL;
+                                ofn.lpfnHook = NULL;
+                                ofn.lpTemplateName = NULL;
+                                if (GetSaveFileNameW(&ofn))
+                                {
+                                    _wfopen_s(&AuditFile, wszPath, L"w");
+                                    if (AuditFile)
+                                    {
+                                        fwprintf(AuditFile, L"Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Software\\ExplorerPatcher]\n\"ImportOK\"=dword:00000001\n");
+                                        POINT pt;
+                                        pt.x = 0;
+                                        pt.y = 0;
+                                        GUI_Build(0, hwnd, pt);
+                                        fclose(AuditFile);
+                                        AuditFile = NULL;
+                                        MessageBoxW(hwnd, L"Settings have been exported successfully.", GUI_title, MB_ICONINFORMATION);
+                                    }
+                                }
+                            }
+                            else if (!strncmp(line + 1, "import", 6))
+                            {
+                                WCHAR title[MAX_PATH];
+                                WCHAR filter[MAX_PATH];
+                                WCHAR wszRegedit[MAX_PATH];
+                                GetWindowsDirectoryW(wszRegedit, MAX_PATH);
+                                wcscat_s(wszRegedit, MAX_PATH, L"\\regedit.exe");
+                                HMODULE hRegedit = LoadLibraryExW(wszRegedit, NULL, LOAD_LIBRARY_AS_DATAFILE);
+                                if (hRegedit)
+                                {
+                                    LoadStringW(hRegedit, 300, title, MAX_PATH);
+                                    LoadStringW(hRegedit, 302, filter, MAX_PATH);
+                                    unsigned j = 0;
+                                    for (unsigned int i = 0; i < MAX_PATH; ++i)
+                                    {
+                                        if (filter[i] == L'#')
+                                        {
+                                            filter[i] = L'\0';
+                                            j++;
+                                            if (j == 2)
+                                            {
+                                                filter[i + 1] = L'\0';
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    FreeLibrary(hRegedit);
+                                }
+                                else
+                                {
+                                    wcscpy_s(title, MAX_PATH, L"Import settings");
+                                    wcscpy_s(filter, MAX_PATH, L"Registration Files (*.reg)\0*.reg\0\0");
+                                }
+                                WCHAR wszPath[MAX_PATH];
+                                ZeroMemory(wszPath, MAX_PATH * sizeof(WCHAR));
+                                DWORD dwLeftMost = 0;
+                                DWORD dwSecondLeft = 0;
+                                DWORD dwSecondRight = 0;
+                                DWORD dwRightMost = 0;
+                                QueryVersionInfo(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE), VS_VERSION_INFO, &dwLeftMost, &dwSecondLeft, &dwSecondRight, &dwRightMost);
+                                swprintf_s(wszPath, MAX_PATH, _T(PRODUCT_NAME) L"_%d.%d.%d.%d.reg", dwLeftMost, dwSecondLeft, dwSecondRight, dwRightMost);
+                                OPENFILENAMEW ofn;
+                                ZeroMemory(&ofn, sizeof(OPENFILENAMEW));
+                                ofn.lStructSize = sizeof(OPENFILENAMEW);
+                                ofn.hwndOwner = hwnd;
+                                ofn.hInstance = GetModuleHandleW(NULL);
+                                ofn.lpstrFilter = filter;
+                                ofn.lpstrCustomFilter = NULL;
+                                ofn.nMaxCustFilter = 0;
+                                ofn.nFilterIndex = 1;
+                                ofn.lpstrFile = wszPath;
+                                ofn.nMaxFile = MAX_PATH;
+                                ofn.lpstrFileTitle = NULL;
+                                ofn.nMaxFileTitle = 0;
+                                ofn.lpstrInitialDir = NULL;
+                                ofn.lpstrTitle = title;
+                                ofn.Flags = OFN_DONTADDTORECENT | OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT | OFN_FILEMUSTEXIST;
+                                ofn.nFileOffset = 0;
+                                ofn.nFileExtension = 0;
+                                ofn.lpstrDefExt = L"reg";
+                                ofn.lCustData = NULL;
+                                ofn.lpfnHook = NULL;
+                                ofn.lpTemplateName = NULL;
+                                if (GetOpenFileNameW(&ofn))
+                                {
+                                    RegDeleteKeyValueW(HKEY_CURRENT_USER, _T(REGPATH), L"ImportOK");
+
+                                    DWORD dwError = 0;
+                                    // https://stackoverflow.com/questions/50298722/win32-launching-a-highestavailable-child-process-as-a-normal-user-process
+                                    if (pvRtlQueryElevationFlags = GetProcAddress(GetModuleHandleW(L"ntdll"), "RtlQueryElevationFlags"))
+                                    {
+                                        PVOID pv;
+                                        if (pv = AddVectoredExceptionHandler(TRUE, OnVex))
+                                        {
+                                            CONTEXT ctx;
+                                            ZeroMemory(&ctx, sizeof(CONTEXT));
+                                            ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                                            ctx.Dr7 = 0x404;
+                                            ctx.Dr1 = (ULONG_PTR)pvRtlQueryElevationFlags;
+
+                                            if (SetThreadContext(GetCurrentThread(), &ctx))
+                                            {
+                                                WCHAR wszExec[MAX_PATH * 2];
+                                                ZeroMemory(wszExec, MAX_PATH * 2 * sizeof(WCHAR));
+                                                wszExec[0] = L'"';
+                                                GetWindowsDirectoryW(wszExec + 1, MAX_PATH);
+                                                wcscat_s(wszExec, MAX_PATH * 2, L"\\regedit.exe\" \"");
+                                                wcscat_s(wszExec, MAX_PATH * 2, wszPath);
+                                                wcscat_s(wszExec, MAX_PATH * 2, L"\"");
+                                                STARTUPINFO si;
+                                                ZeroMemory(&si, sizeof(STARTUPINFO));
+                                                si.cb = sizeof(STARTUPINFO);
+                                                PROCESS_INFORMATION pi;
+                                                ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
+                                                wprintf(L"%s\n", wszExec);
+                                                if (CreateProcessW(NULL, wszExec, 0, 0, 0, 0, 0, 0, &si, &pi))
+                                                {
+                                                    CloseHandle(pi.hThread);
+                                                    //CloseHandle(pi.hProcess);
+                                                }
+                                                else
+                                                {
+                                                    dwError = GetLastError();
+                                                }
+
+                                                ctx.Dr7 = 0x400;
+                                                ctx.Dr1 = 0;
+                                                SetThreadContext(GetCurrentThread(), &ctx);
+
+                                                if (pi.hProcess)
+                                                {
+                                                    WaitForSingleObject(pi.hProcess, INFINITE);
+                                                    DWORD dwExitCode = 0;
+                                                    GetExitCodeProcess(pi.hProcess, &dwExitCode);
+                                                    CloseHandle(pi.hProcess);
+                                                }
+                                            }
+                                            else
+                                            {
+                                                dwError = GetLastError();
+                                            }
+                                            RemoveVectoredExceptionHandler(pv);
+                                        }
+                                        else
+                                        {
+                                            dwError = GetLastError();
+                                        }
+                                    }
+                                    else
+                                    {
+                                        dwError = GetLastError();
+                                    }
+
+                                    DWORD dwData = 0, dwSize = sizeof(DWORD);
+                                    RegGetValueW(HKEY_CURRENT_USER, _T(REGPATH), L"ImportOK", RRF_RT_DWORD, NULL, &dwData, &dwSize);
+                                    if (dwData)
+                                    {
+                                        RegDeleteKeyValueW(HKEY_CURRENT_USER, _T(REGPATH), L"ImportOK");
+
+                                        FILE* vf = NULL;
+                                        _wfopen_s(&vf, wszPath, L"r");
+                                        if (vf)
+                                        {
+                                            char* line2 = malloc(MAX_LINE_LENGTH * sizeof(char));
+                                            if (line2)
+                                            {
+                                                int numChRd2 = 0;
+                                                size_t bufsiz2 = MAX_LINE_LENGTH;
+                                                while ((numChRd2 = getline(&line2, &bufsiz2, vf)) != -1)
+                                                {
+                                                    if (!strncmp(line2, ";\"Virtualized_" EP_CLSID, 52))
+                                                    {
+                                                        DWORD dwVal = 0;
+                                                        WCHAR wszName[MAX_PATH];
+                                                        ZeroMemory(wszName, MAX_PATH * sizeof(wchar_t));
+                                                        MultiByteToWideChar(
+                                                            CP_UTF8,
+                                                            MB_PRECOMPOSED,
+                                                            line2 + 2,
+                                                            numChRd2 - 2,
+                                                            wszName,
+                                                            MAX_PATH
+                                                        );
+                                                        wchar_t* ddd = wcschr(wszName, L'=');
+                                                        if (ddd) *ddd = 0;
+                                                        wchar_t* ppp = wcschr(wszName, L'"');
+                                                        if (ppp) *ppp = 0;
+                                                        if (!wcsncmp(ddd + 1, L"dword:", 6))
+                                                        {
+                                                            wchar_t* xxx = wcschr(ddd + 1, L':');
+                                                            xxx++;
+                                                            dwVal = wcstol(xxx, NULL, 16);
+                                                            wprintf(L"%s %d\n", wszName, dwVal);
+                                                            GUI_RegSetValueExW(NULL, wszName, 0, RRF_RT_DWORD, &dwVal, sizeof(DWORD));
+                                                        }
+                                                        else
+                                                        {
+                                                            //WCHAR* wszTitle = malloc(MAX_LINE_LENGTH * sizeof(WCHAR));
+                                                            //wchar_t* x = wcschr(ddd + 2, L'"');
+                                                            //x[0] = 0;
+                                                            //wprintf(L">>> %s\n", ddd + 2);
+                                                        }
+                                                    }
+                                                }
+                                                free(line2);
+                                            }
+                                            fclose(vf);
+                                        }
+                                    }
+                                }
+                            }
+                            else if (!strncmp(line + 1, "update_weather", 14))
+                            {
+                                PostMessageW(FindWindowW(_T(EPW_WEATHER_CLASSNAME), NULL), EP_WEATHER_WM_FETCH_DATA, 0, 0);
+                            }
+                            else if (!strncmp(line + 1, "clear_data_weather", 18))
+                            {
+                                if (MessageBoxW(
+                                    hwnd,
+                                    L"Are you sure you want to permanently clear the weather widget's local data?\n\n"
+                                    L"This will reset the internal components to their default state, but will preserve "
+                                    L"your preferences. This may fix the widget not loading the data properly, or "
+                                    L"having layout issues etc.",
+                                    _T(PRODUCT_NAME),
+                                    MB_ICONQUESTION | MB_YESNO) == IDYES)
+                                {
+                                    DWORD dwData = 0, dwVal = 0, dwSize = sizeof(DWORD);
+                                    GUI_Internal_RegQueryValueExW(NULL, L"Virtualized_" _T(EP_CLSID) L"_PeopleBand", NULL, NULL, &dwData, &dwSize);
+                                    int res = 0;
+                                    if (dwData)
+                                    {
+                                        GUI_Internal_RegSetValueExW(NULL, L"Virtualized_" _T(EP_CLSID) L"_PeopleBand", 0, 0, &dwVal, sizeof(DWORD));
+                                        PleaseWaitTimeout = 100;
+                                        PleaseWaitCallbackData = &res;
+                                        PleaseWaitCallbackFunc = GUI_Internal_DeleteWeatherFolder;
+                                        PleaseWaitHook = SetWindowsHookExW(WH_CALLWNDPROC, PleaseWait_HookProc, NULL, GetCurrentThreadId());
+                                        MessageBoxW(hwnd, L"Please wait...", _T(PRODUCT_NAME), 0);
+                                    }
+                                    else
+                                    {
+                                        res = GUI_DeleteWeatherFolder();
+                                    }
+                                    if (res == IDOK)
+                                    {
+                                        MessageBoxW(hwnd, L"Weather widget data cleared successfully.", _T(PRODUCT_NAME), MB_ICONINFORMATION);
+                                    }
+                                    else
+                                    {
+                                        if (res == IDABORT)
+                                        {
+                                            MessageBoxW(hwnd, L"An error has occured while clearing the data.", _T(PRODUCT_NAME), MB_ICONERROR);
+                                        }
+                                    }
+                                    if (dwData)
+                                    {
+                                        dwVal = 1;
+                                        GUI_Internal_RegSetValueExW(NULL, L"Virtualized_" _T(EP_CLSID) L"_PeopleBand", 0, 0, &dwVal, sizeof(DWORD));
+                                    }
+                                }
+                            }
+                            else if (!strncmp(line + 1, "pin_tiles", 9))
+                            {
+                                BOOL bFirst = TRUE;
+                                DWORD dwPermitOldStartTileData = TRUE;
+                                DWORD dwSize = sizeof(DWORD);
+                                RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\ExplorerPatcher", L"PermitOldStartTileDataOneShot", REG_DWORD, &dwPermitOldStartTileData, dwSize);
+                                /*
+                                LPCWSTR csPath = L"::{26EE0668-A00A-44D7-9371-BEB064C98683}";
+                                SFGAOF stSFGAOFIn = 0;
+                                SFGAOF stSFGAOFOut = 0;
+                                SHParseDisplayName(csPath, NULL, &pidl, stSFGAOFIn, &stSFGAOFOut);
+                                */
+                                WCHAR wszOrigPath[MAX_PATH], wszCurPath[MAX_PATH];
+                                IShellFolder* psfDesktop = NULL;
+                                hr = SHGetDesktopFolder(&psfDesktop);
+                                if (psfDesktop)
+                                {
+                                    LPITEMIDLIST pidl;
+                                    hr = SHGetFolderLocation(NULL, CSIDL_CONTROLS, (HANDLE)-1, 0, &pidl);
+                                    if (pidl)
+                                    {
+                                        STRRET strret;
+                                        hr = psfDesktop->lpVtbl->GetDisplayNameOf(psfDesktop, pidl, SHGDN_FORPARSING, &strret);
+                                        StrRetToBufW(&strret, pidl, wszOrigPath, MAX_PATH);
+                                        SHOpenFolderAndSelectItems(pidl, 0, NULL, 0);
+                                        VARIANT vt;
+                                        HRESULT hr = E_FAIL;
+                                        IShellWindows* pShellWindows = NULL;
+                                        hr = CoCreateInstance(&CLSID_ShellWindows, NULL, CLSCTX_ALL, &IID_IShellWindows, &pShellWindows);
+                                        if (pShellWindows)
+                                        {
+                                            long k = 0;
+                                            pShellWindows->lpVtbl->get_Count(pShellWindows, &k);
+                                            for (int i = 0; i < k; ++i)
+                                            {
+                                                vt.vt = VT_I4;
+                                                vt.intVal = i;
+                                                IDispatch* pDispatch = NULL;
+                                                hr = pShellWindows->lpVtbl->Item(pShellWindows, vt, &pDispatch);
+                                                if (pDispatch)
+                                                {
+                                                    IWebBrowserApp* pWebBrowserApp = NULL;
+                                                    hr = pDispatch->lpVtbl->QueryInterface(pDispatch, &IID_IWebBrowserApp, &pWebBrowserApp);
+                                                    if (pWebBrowserApp)
+                                                    {
+                                                        IServiceProvider* pServiceProvider = NULL;
+                                                        hr = pWebBrowserApp->lpVtbl->QueryInterface(pWebBrowserApp, &IID_IServiceProvider, &pServiceProvider);
+                                                        if (pServiceProvider)
+                                                        {
+                                                            IShellBrowser* pShellBrowser = NULL;
+                                                            hr = pServiceProvider->lpVtbl->QueryService(pServiceProvider, &SID_STopLevelBrowser, &IID_IShellBrowser, &pShellBrowser);
+                                                            if (pShellBrowser)
+                                                            {
+                                                                IShellView* pShellView = NULL;
+                                                                hr = pShellBrowser->lpVtbl->QueryActiveShellView(pShellBrowser, &pShellView);
+                                                                if (pShellView)
+                                                                {
+                                                                    IFolderView* pFolderView = NULL;
+                                                                    hr = pShellView->lpVtbl->QueryInterface(pShellView, &IID_IFolderView, &pFolderView);
+                                                                    if (pFolderView)
+                                                                    {
+                                                                        IPersistFolder2* pPersistFolder2 = NULL;
+                                                                        hr = pFolderView->lpVtbl->GetFolder(pFolderView, &IID_IPersistFolder2, &pPersistFolder2);
+                                                                        if (pPersistFolder2)
+                                                                        {
+                                                                            LPITEMIDLIST pCur = NULL;
+                                                                            hr = pPersistFolder2->lpVtbl->GetCurFolder(pPersistFolder2, &pCur);
+                                                                            if (pCur)
+                                                                            {
+                                                                                hr = psfDesktop->lpVtbl->GetDisplayNameOf(psfDesktop, pCur, SHGDN_FORPARSING, &strret);
+                                                                                StrRetToBufW(&strret, pidl, wszCurPath, MAX_PATH);
+                                                                                if (!_wcsnicmp(wszOrigPath, wszCurPath, 40) && wcslen(wszCurPath) == 40 && bFirst)
+                                                                                {
+                                                                                    LPITEMIDLIST pNew = NULL;
+                                                                                    hr = SHGetFolderLocation(NULL, CSIDL_DRIVES, (HANDLE)-1, 0, &pNew);
+                                                                                    if (pNew)
+                                                                                    {
+                                                                                        hr = pShellBrowser->lpVtbl->BrowseObject(pShellBrowser, pNew, SBSP_SAMEBROWSER);
+                                                                                        if (SUCCEEDED(hr))
+                                                                                        {
+                                                                                            HWND hWndExp = NULL;
+                                                                                            pWebBrowserApp->lpVtbl->get_HWND(pWebBrowserApp, &hWndExp);
+                                                                                            if (hWndExp)
+                                                                                            {
+                                                                                                INPUT input;
+                                                                                                ZeroMemory(&input, sizeof(INPUT));
+                                                                                                input.type = INPUT_KEYBOARD;
+                                                                                                input.ki.wVk = VK_F5;
+                                                                                                SetForegroundWindow(hWndExp);
+                                                                                                SendInput(1, &input, sizeof(INPUT));
+                                                                                                bFirst = FALSE;
+                                                                                            }
+                                                                                        }
+                                                                                        CoTaskMemFree(pNew);
+                                                                                    }
+                                                                                }
+                                                                                CoTaskMemFree(pCur);
+                                                                            }
+                                                                            pPersistFolder2->lpVtbl->Release(pPersistFolder2);
+                                                                        }
+                                                                        pFolderView->lpVtbl->Release(pFolderView);
+                                                                    }
+                                                                    pShellView->lpVtbl->Release(pShellView);
+                                                                }
+                                                                pShellBrowser->lpVtbl->Release(pShellBrowser);
+                                                            }
+                                                            pServiceProvider->lpVtbl->Release(pServiceProvider);
+                                                        }
+                                                        pWebBrowserApp->lpVtbl->Release(pWebBrowserApp);
+                                                    }
+                                                    pDispatch->lpVtbl->Release(pDispatch);
+                                                }
+                                            }
+                                            pShellWindows->lpVtbl->Release(pShellWindows);
+                                        }
+                                        CoTaskMemFree(pidl);
+                                    }
+                                    psfDesktop->lpVtbl->Release(psfDesktop);
+                                }
+                            }
                         }
                     }
                     dwMaxHeight += dwLineHeight * dy;
@@ -1363,7 +2243,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         tabOrder++;
                     }
                 }
-                else if (!strncmp(line, ";l ", 3) || !strncmp(line, ";y ", 3) || !strncmp(line, ";c ", 3) || !strncmp(line, ";z ", 3) || !strncmp(line, ";b ", 3) || !strncmp(line, ";i ", 3) || !strncmp(line, ";d ", 3) || !strncmp(line, ";v ", 3))
+                else if (!strncmp(line, ";l ", 3) || !strncmp(line, ";y ", 3) || !strncmp(line, ";c ", 3) || !strncmp(line, ";w ", 3) || !strncmp(line, ";z ", 3) || !strncmp(line, ";b ", 3) || !strncmp(line, ";i ", 3) || !strncmp(line, ";d ", 3) || !strncmp(line, ";v ", 3))
                 {
                     ZeroMemory(text, (MAX_LINE_LENGTH + 3) * sizeof(wchar_t));
                     text[0] = L'\u2795';
@@ -1382,9 +2262,14 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                     if (x) *x = 0;
                     x = wcschr(text, L'\r');
                     if (x) *x = 0;
-                    if (!strncmp(line, ";c ", 3) || !strncmp(line, ";z ", 3) || !strncmp(line, ";b ", 3) || !strncmp(line, ";i ", 3) || !strncmp(line, ";d ", 3) || !strncmp(line, ";v ", 3))
+                    if (!strncmp(line, ";w ", 3) || !strncmp(line, ";c ", 3) || !strncmp(line, ";z ", 3) || !strncmp(line, ";b ", 3) || !strncmp(line, ";i ", 3) || !strncmp(line, ";d ", 3) || !strncmp(line, ";v ", 3))
                     {
+                        WCHAR* wszTitle = NULL;
+                        WCHAR* wszPrompt = NULL;
+                        WCHAR* wszDefault = NULL;
+                        WCHAR* wszFallbackDefault = NULL;
                         HMENU hMenu = NULL;
+                        BOOL bInput = !strncmp(line, ";w ", 3);
                         BOOL bChoice = !strncmp(line, ";c ", 3);
                         BOOL bChoiceLefted = !strncmp(line, ";z ", 3);
                         BOOL bInvert = !strncmp(line, ";i ", 3);
@@ -1445,7 +2330,60 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 free(miText);
                             }
                         }
+                        else if (bInput)
+                        {
+                            wszTitle = malloc(MAX_LINE_LENGTH * sizeof(WCHAR));
+                            wszPrompt = malloc(MAX_LINE_LENGTH * sizeof(WCHAR));
+                            wszDefault = malloc(MAX_LINE_LENGTH * sizeof(WCHAR));
+                            wszFallbackDefault = malloc(MAX_LINE_LENGTH * sizeof(WCHAR));
+                            char* l = malloc(MAX_LINE_LENGTH * sizeof(char));
+                            numChRd = getline(&l, &bufsiz, f);
+                            char* p = l;
+                            p = strchr(p + 1, '\r');
+                            if (p) *p = 0;
+                            p = strchr(p + 1, '\n');
+                            if (p) *p = 0;
+                            MultiByteToWideChar(
+                                CP_UTF8,
+                                MB_PRECOMPOSED,
+                                l + 1,
+                                numChRd - 1,
+                                wszPrompt,
+                                MAX_LINE_LENGTH
+                            );
+                            numChRd = getline(&l, &bufsiz, f);
+                            p = l;
+                            p = strchr(p + 1, '\r');
+                            if (p) *p = 0;
+                            p = strchr(p + 1, '\n');
+                            if (p) *p = 0;
+                            MultiByteToWideChar(
+                                CP_UTF8,
+                                MB_PRECOMPOSED,
+                                l + 1,
+                                numChRd - 1,
+                                wszFallbackDefault,
+                                MAX_LINE_LENGTH
+                            );
+                            free(l);
+                        }
                         numChRd = getline(&line, &bufsiz, f);
+                        if (!strncmp(line, ";\"Virtualized_" EP_CLSID, 52))
+                        {
+                            for (unsigned int kkkk = 1; kkkk < MAX_LINE_LENGTH; ++kkkk)
+                            {
+                                if (line[kkkk])
+                                {
+                                    line[kkkk - 1] = line[kkkk];
+                                }
+                                else
+                                {
+                                    line[kkkk - 1] = 0;
+                                    break;
+                                }
+                            }
+                            ////////printf("%s\n", line);
+                        }
                         ZeroMemory(name, MAX_LINE_LENGTH * sizeof(wchar_t));
                         MultiByteToWideChar(
                             CP_UTF8,
@@ -1510,16 +2448,49 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         DWORD value = FALSE;
 
                         //wprintf(L"%s %s %s\n", section, name, d + 1);
-                        if (!wcsncmp(d + 1, L"dword:", 6))
+                        if (!bInput && !wcsncmp(d + 1, L"dword:", 6))
                         {
                             wchar_t* x = wcschr(d + 1, L':');
                             x++;
                             value = wcstol(x, NULL, 16);
                         }
-
-                        if (!bJustCheck)
+                        if (bInput)
                         {
-                            RegCreateKeyExW(
+                            wchar_t* x = wcschr(d + 2, L'"');
+                            x[0] = 0;
+                            wcscpy_s(wszDefault, MAX_LINE_LENGTH, d + 2);
+                        }
+
+                        if (bInput)
+                        {
+                            dwSize = MAX_LINE_LENGTH;
+                            GUI_RegCreateKeyExW(
+                                bIsHKLM ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER,
+                                wcschr(section, L'\\') + 1,
+                                0,
+                                NULL,
+                                REG_OPTION_NON_VOLATILE,
+                                KEY_READ | (hDC ? 0 : (!bIsHKLM ? KEY_WRITE : 0)),
+                                NULL,
+                                & hKey,
+                                & dwDisposition
+                            );
+                            if (hKey == NULL || hKey == INVALID_HANDLE_VALUE)
+                            {
+                                hKey = NULL;
+                            }
+                            GUI_RegQueryValueExW(
+                                hKey,
+                                name,
+                                0,
+                                NULL,
+                                wszDefault,
+                                &dwSize
+                            );
+                        }
+                        else if (!bJustCheck)
+                        {
+                            GUI_RegCreateKeyExW(
                                 bIsHKLM ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER,
                                 wcschr(section, L'\\') + 1,
                                 0,
@@ -1553,7 +2524,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         }
                         else
                         {
-                            RegOpenKeyExW(
+                            GUI_RegOpenKeyExW(
                                 bIsHKLM ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER,
                                 wcschr(section, L'\\') + 1,
                                 REG_OPTION_NON_VOLATILE,
@@ -1566,7 +2537,28 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                             }
                             value = hKey;
                         }
-                        if (bInvert || bBool || bJustCheck)
+                        if (bInput)
+                        {
+                            wcscpy_s(wszTitle, MAX_LINE_LENGTH, text + 3);
+                            wcscat_s(
+                                text,
+                                MAX_LINE_LENGTH,
+                                L" : "
+                            );
+                            if (wszDefault[0] == 0)
+                            {
+                                wcscat_s(text, MAX_LINE_LENGTH, wszFallbackDefault);
+                            }
+                            else
+                            {
+                                wcscat_s(
+                                    text,
+                                    MAX_LINE_LENGTH,
+                                    wszDefault
+                                );
+                            }
+                        }
+                        else if (bInvert || bBool || bJustCheck)
                         {
                             if (value)
                             {
@@ -1719,7 +2711,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                     }
                                     else
                                     {
-                                        RegCreateKeyExW(
+                                        GUI_RegCreateKeyExW(
                                             bIsHKLM ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER,
                                             wcschr(section, L'\\') + 1,
                                             0,
@@ -1753,7 +2745,33 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                             else
                             {
                                 DWORD val = 0;
-                                if (bChoice || bChoiceLefted)
+                                if (bInput)
+                                {
+                                    WCHAR* wszAnswer = calloc(MAX_LINE_LENGTH, sizeof(WCHAR));
+                                    BOOL bWasCancelled = FALSE;
+                                    if (SUCCEEDED(InputBox(FALSE, hwnd, wszPrompt, wszTitle, wszDefault, wszAnswer, MAX_LINE_LENGTH, &bWasCancelled)) && !bWasCancelled)
+                                    {
+                                        if (wszAnswer[0])
+                                        {
+                                            GUI_RegSetValueExW(
+                                                hKey,
+                                                name,
+                                                0,
+                                                REG_SZ,
+                                                wszAnswer,
+                                                (wcslen(wszAnswer) + 1) * sizeof(WCHAR)
+                                            );
+                                        }
+                                        else
+                                        {
+                                            RegDeleteValueW(hKey, name);
+                                        }
+                                        Sleep(100);
+                                        PostMessageW(FindWindowW(_T(EPW_WEATHER_CLASSNAME), NULL), EP_WEATHER_WM_FETCH_DATA, 0, 0);
+                                    }
+                                    free(wszAnswer);
+                                }
+                                else if (bChoice || bChoiceLefted)
                                 {
                                     RECT rcTemp;
                                     rcTemp = rcText;
@@ -1797,7 +2815,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 {
                                     value = _this->section + 1;
                                 }
-                                if (!(bChoice || bChoiceLefted) || ((bChoice || bChoiceLefted) && val))
+                                if (!bInput && (!(bChoice || bChoiceLefted) || ((bChoice || bChoiceLefted) && val)))
                                 {
                                     GUI_RegSetValueExW(
                                         hKey,
@@ -1830,6 +2848,22 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 }
                             }
                             DestroyMenu(hMenu);
+                        }
+                        if (wszTitle)
+                        {
+                            free(wszTitle);
+                        }
+                        if (wszPrompt)
+                        {
+                            free(wszPrompt);
+                        }
+                        if (wszDefault)
+                        {
+                            free(wszDefault);
+                        }
+                        if (wszFallbackDefault)
+                        {
+                            free(wszFallbackDefault);
                         }
                     }
                     if (hDC && (!strncmp(line, ";l ", 3) || !strncmp(line, ";y ", 3)))
@@ -1926,7 +2960,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         if (tabOrder == _this->tabOrder)
                         {
                             bTabOrderHit = TRUE;
-                            if (!IsThemeActive())
+                            if (!IsThemeActive() || IsHighContrast())
                             {
                                 cr = SetTextColor(hdcPaint, GetSysColor(COLOR_HIGHLIGHT));
                             }
@@ -1976,6 +3010,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 if (text[0] == L'\u2714') dwType = 1;
                                 else if (text[0] == L'\u274C') dwType = 2;
                                 else if (text[accLen - 1] == 56405) dwType = 3;
+                                else if (!strstr(line, "dword")) dwType = 5;
                                 WCHAR accText[1000], accText2[1000];
                                 ZeroMemory(accText, 1000 * sizeof(wchar_t));
                                 ZeroMemory(accText2, 1000 * sizeof(wchar_t));
@@ -1993,7 +3028,8 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                     (dwType == 2 ? L"Disabled" :
                                         (dwType == 3 ? L"Link" :
                                             (dwType == 4 ? L"Button" :
-                                                L"List")))
+                                                (dwType == 5 ? L"Input" : 
+                                                    L"List"))))
                                 );
                                 accLen = wcslen(accText);
                                 unsigned int j = 0;
@@ -2048,7 +3084,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                                 _this->bShouldAnnounceSelected = FALSE;
                             }
                         }
-                        if (IsThemeActive())
+                        if (IsThemeActive() && !IsHighContrast())
                         {
                             DrawThemeTextEx(
                                 _this->hTheme,
@@ -2074,7 +3110,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                         }
                         if (tabOrder == _this->tabOrder)
                         {
-                            if (!IsThemeActive())
+                            if (!IsThemeActive() || IsHighContrast())
                             {
                                 SetTextColor(hdcPaint, cr);
                             }
@@ -2088,6 +3124,10 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
                     dwMaxHeight += dwLineHeight * dy;
                     tabOrder++;
                 }
+            }
+            if (hOldFont)
+            {
+                SelectObject(hdcPaint, hOldFont);
             }
         }
         fclose(f);
@@ -2104,7 +3144,6 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
             InvalidateRect(hwnd, NULL, FALSE);
         }
 
-        SelectObject(hdcPaint, hOldFont);
         if (!hDC)
         {
             ReleaseDC(hwnd, hdcPaint);
@@ -2131,7 +3170,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
             swprintf_s(
                 wszAccText,
                 100,
-                L"Selected page: %s: %d out of %d.",
+                L"Selected page: %s: %d of %d.",
                 _this->sectionNames[_this->section],
                 _this->section + 1,
                 max_section + 1
@@ -2184,7 +3223,7 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
         printf("%d %d - %d %d\n", rcWin.right - rcWin.left, rcWin.bottom - rcWin.top, dwMaxWidth, dwMaxHeight);
 
         dwMaxWidth += dwInitialLeftPad + _this->padding.left + _this->padding.right;
-        if (!IsThemeActive())
+        if (!IsThemeActive() || IsHighContrast() || !IsWindows11() || IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
         {
             dwMaxHeight += GUI_LINE_HEIGHT * dy + 20 * dy;
         }
@@ -2204,71 +3243,78 @@ static BOOL GUI_Build(HDC hDC, HWND hwnd, POINT pt)
             mi.rcWork.top + ((mi.rcWork.bottom - mi.rcWork.top) / 2 - (dwMaxHeight) / 2),
             dwMaxWidth,
             dwMaxHeight,
-            SWP_NOZORDER | SWP_NOACTIVATE
+            SWP_NOZORDER | SWP_NOACTIVATE | (_this->bCalcExtent == 2 ? SWP_NOMOVE : 0)
         );
 
-        DWORD dwReadSection = 0;
+        if (_this->bCalcExtent != 2)
+        {
+            DWORD dwReadSection = 0;
 
-        HKEY hKey = NULL;
-        DWORD dwSize = sizeof(DWORD);
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            TEXT(REGPATH),
-            0,
-            NULL,
-            REG_OPTION_NON_VOLATILE,
-            KEY_READ | KEY_WOW64_64KEY | KEY_WRITE,
-            NULL,
-            &hKey,
-            NULL
-        );
-        if (hKey == NULL || hKey == INVALID_HANDLE_VALUE)
-        {
-            hKey = NULL;
-        }
-        if (hKey)
-        {
-            dwReadSection = 0;
-            dwSize = sizeof(DWORD);
-            RegQueryValueExW(
-                hKey,
-                TEXT("LastSectionInProperties"),
+            HKEY hKey = NULL;
+            DWORD dwSize = sizeof(DWORD);
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                TEXT(REGPATH),
                 0,
                 NULL,
-                &dwReadSection,
-                &dwSize
+                REG_OPTION_NON_VOLATILE,
+                KEY_READ | KEY_WOW64_64KEY | KEY_WRITE,
+                NULL,
+                &hKey,
+                NULL
             );
-            if (dwReadSection)
+            if (hKey == NULL || hKey == INVALID_HANDLE_VALUE)
             {
-                _this->section = dwReadSection - 1;
+                hKey = NULL;
             }
-            dwReadSection = 0;
-            dwSize = sizeof(DWORD);
-            RegQueryValueExW(
-                hKey,
-                TEXT("OpenPropertiesAtNextStart"),
-                0,
-                NULL,
-                &dwReadSection,
-                &dwSize
-            );
-            if (dwReadSection)
+            if (hKey)
             {
-                _this->section = dwReadSection - 1;
                 dwReadSection = 0;
-                RegSetValueExW(
+                dwSize = sizeof(DWORD);
+                RegQueryValueExW(
+                    hKey,
+                    TEXT("LastSectionInProperties"),
+                    0,
+                    NULL,
+                    &dwReadSection,
+                    &dwSize
+                );
+                if (dwReadSection)
+                {
+                    _this->section = dwReadSection - 1;
+                }
+                dwReadSection = 0;
+                dwSize = sizeof(DWORD);
+                RegQueryValueExW(
                     hKey,
                     TEXT("OpenPropertiesAtNextStart"),
                     0,
-                    REG_DWORD,
+                    NULL,
                     &dwReadSection,
-                    sizeof(DWORD)
+                    &dwSize
                 );
+                if (dwReadSection)
+                {
+                    _this->section = dwReadSection - 1;
+                    dwReadSection = 0;
+                    RegSetValueExW(
+                        hKey,
+                        TEXT("OpenPropertiesAtNextStart"),
+                        0,
+                        REG_DWORD,
+                        &dwReadSection,
+                        sizeof(DWORD)
+                    );
+                }
+                RegCloseKey(hKey);
             }
-            RegCloseKey(hKey);
         }
-
-        _this->bCalcExtent = FALSE;
+        if (_this->bCalcExtent == 2)
+        {
+            _this->section = _this->last_section;
+        }
+        
+        _this->bCalcExtent = 0;
         InvalidateRect(hwnd, NULL, FALSE);
     }
 
@@ -2309,27 +3355,41 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         _this->dpi.x = dpiX;
         _this->dpi.y = dpiY;
         SetRect(&_this->border_thickness, 2, 2, 2, 2);
-        if (IsThemeActive())
+        if (IsThemeActive() && IsWindows11() && !IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
         {
             BOOL bIsCompositionEnabled = TRUE;
             DwmIsCompositionEnabled(&bIsCompositionEnabled);
             if (bIsCompositionEnabled)
             {
-                MARGINS marGlassInset = { -1, -1, -1, -1 }; // -1 means the whole window
+                MARGINS marGlassInset;
+                if (!IsHighContrast())
+                {
+                    marGlassInset.cxLeftWidth = -1; // -1 means the whole window
+                    marGlassInset.cxRightWidth = -1;
+                    marGlassInset.cyBottomHeight = -1;
+                    marGlassInset.cyTopHeight = -1;
+                }
+                else
+                {
+                    marGlassInset.cxLeftWidth = 0;
+                    marGlassInset.cxRightWidth = 0;
+                    marGlassInset.cyBottomHeight = 0;
+                    marGlassInset.cyTopHeight = 0;
+                }
                 DwmExtendFrameIntoClientArea(hWnd, &marGlassInset);
             }
         }
         SetWindowPos(
-            hWnd, 
-            hWnd, 
+            hWnd,
+            hWnd,
             mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) / 2 - (_this->size.cx * dx) / 2),
             mi.rcWork.top + ((mi.rcWork.bottom - mi.rcWork.top) / 2 - (_this->size.cy * dy) / 2),
-            _this->size.cx * dxp, 
+            _this->size.cx * dxp,
             _this->size.cy * dyp,
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
         );
         SetTimer(hWnd, GUI_TIMER_READ_HELP, GUI_TIMER_READ_HELP_TIMEOUT, NULL);
-        if (IsThemeActive())
+        if (IsThemeActive() && !IsHighContrast() && IsWindows11() && !IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
         {
             RECT rcTitle;
             DwmGetWindowAttribute(hWnd, DWMWA_CAPTION_BUTTON_BOUNDS, &rcTitle, sizeof(RECT));
@@ -2339,13 +3399,18 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         {
             _this->GUI_CAPTION_LINE_HEIGHT = GUI_CAPTION_LINE_HEIGHT_DEFAULT;
         }
-        if (IsThemeActive() && ShouldAppsUseDarkMode)
+        if (IsThemeActive() && ShouldAppsUseDarkMode && !IsHighContrast())
         {
             AllowDarkModeForWindow(hWnd, g_darkModeEnabled);
             BOOL value = g_darkModeEnabled;
-            DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(BOOL));
+            int s = 0;
+            if (global_rovi.dwBuildNumber < 18985)
+            {
+                s = -1;
+            }
+            DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE + s, &value, sizeof(BOOL));
         }
-        if (!IsThemeActive())
+        if (!IsThemeActive() || IsHighContrast() || !IsWindows11() || IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
         {
             int extendedStyle = GetWindowLong(hWnd, GWL_EXSTYLE);
             SetWindowLong(hWnd, GWL_EXSTYLE, extendedStyle | WS_EX_DLGMODALFRAME);
@@ -2369,23 +3434,63 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
     {
         if (IsColorSchemeChangeMessage(lParam))
         {
-            if (IsThemeActive() && ShouldAppsUseDarkMode)
+            if (IsThemeActive() && IsWindows11() && !IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
             {
-                RefreshImmersiveColorPolicyState();
                 BOOL bIsCompositionEnabled = TRUE;
                 DwmIsCompositionEnabled(&bIsCompositionEnabled);
+                if (bIsCompositionEnabled)
+                {
+                    MARGINS marGlassInset;
+                    if (!IsHighContrast())
+                    {
+                        marGlassInset.cxLeftWidth = -1; // -1 means the whole window
+                        marGlassInset.cxRightWidth = -1;
+                        marGlassInset.cyBottomHeight = -1;
+                        marGlassInset.cyTopHeight = -1;
+                    }
+                    else
+                    {
+                        marGlassInset.cxLeftWidth = 0;
+                        marGlassInset.cxRightWidth = 0;
+                        marGlassInset.cyBottomHeight = 0;
+                        marGlassInset.cyTopHeight = 0;
+                    }
+                    DwmExtendFrameIntoClientArea(hWnd, &marGlassInset);
+                }
+            }
+            BOOL bIsCompositionEnabled = TRUE;
+            DwmIsCompositionEnabled(&bIsCompositionEnabled);
+            if (bIsCompositionEnabled)
+            {
+                BOOL value = (IsThemeActive() && !IsHighContrast() && IsWindows11()) ? 1 : 0;
+                SetMicaMaterialForThisWindow(hWnd, value);
+            }
+            if (IsThemeActive() && ShouldAppsUseDarkMode && !IsHighContrast())
+            {
+                RefreshImmersiveColorPolicyState();
                 BOOL bDarkModeEnabled = IsThemeActive() && bIsCompositionEnabled && ShouldAppsUseDarkMode() && !IsHighContrast();
                 if (bDarkModeEnabled != g_darkModeEnabled)
                 {
                     g_darkModeEnabled = bDarkModeEnabled;
                     AllowDarkModeForWindow(hWnd, g_darkModeEnabled);
                     BOOL value = g_darkModeEnabled;
-                    DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(BOOL));
+                    int s = 0;
+                    if (global_rovi.dwBuildNumber < 18985)
+                    {
+                        s = -1;
+                    }
+                    DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE + s, &value, sizeof(BOOL));
+                    _this->bCalcExtent = 2;
+                    _this->last_section = _this->section;
+                    _this->section = 0;
                     InvalidateRect(hWnd, NULL, FALSE);
                 }
             }
             else
             {
+                _this->bCalcExtent = 2;
+                _this->last_section = _this->section;
+                _this->section = 0;
                 InvalidateRect(hWnd, NULL, FALSE);
             }
         }
@@ -2434,10 +3539,10 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             return 0;
         }
         // this should be determined from the file, but for now it works
-        else if (wParam >= '1' && wParam <= '9') 
+        else if (wParam >= '1' && wParam <= '9' || wParam == '0')
         {
             _this->tabOrder = 0;
-            GUI_SetSection(_this, TRUE, wParam - '1');
+            GUI_SetSection(_this, TRUE, wParam == '0' ? 9 : wParam - '1');
             _this->bShouldAnnounceSelected = TRUE;
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
@@ -2482,8 +3587,21 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             SetTimer(hWnd, GUI_TIMER_READ_HELP, 200, NULL);
             return 0;
         }
+        else if (wParam == VK_F5)
+        {
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
+        else if (wParam == 'Z')
+        {
+            return 0;
+        }
+        else if (wParam == 'X')
+        {
+            return 0;
+        }
     }
-    else if (uMsg == WM_NCMOUSELEAVE && IsThemeActive())
+    else if (uMsg == WM_NCMOUSELEAVE && IsThemeActive() && !IsHighContrast() && IsWindows11() && !IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
     {
         LRESULT lRes = 0;
         if (DwmDefWindowProc(hWnd, uMsg, wParam, lParam, &lRes))
@@ -2491,7 +3609,7 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             return lRes;
         }
     }
-    else if (uMsg == WM_NCRBUTTONUP && IsThemeActive())
+    else if (uMsg == WM_NCRBUTTONUP && IsThemeActive() && !IsHighContrast() && IsWindows11() && !IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
     {
         HMENU pSysMenu = GetSystemMenu(hWnd, FALSE);
         if (pSysMenu != NULL)
@@ -2509,7 +3627,7 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         }
         return 0;
     }
-    else if ((uMsg == WM_LBUTTONUP || uMsg == WM_RBUTTONUP) && IsThemeActive())
+    else if ((uMsg == WM_LBUTTONUP || uMsg == WM_RBUTTONUP) && IsThemeActive() && !IsHighContrast() && IsWindows11() && !IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
     {
         POINT pt;
         pt.x = GET_X_LPARAM(lParam);
@@ -2565,7 +3683,7 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             return 0;
         }
     }
-    else if (uMsg == WM_NCHITTEST && IsThemeActive())
+    else if (uMsg == WM_NCHITTEST && IsThemeActive() && !IsHighContrast() && IsWindows11() && !IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
     {
         LRESULT lRes = 0;
         if (DwmDefWindowProc(hWnd, uMsg, wParam, lParam, &lRes))
@@ -2592,7 +3710,7 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             return HTCAPTION;
         }
     }
-    else if (uMsg == WM_NCCALCSIZE && wParam == TRUE && IsThemeActive())
+    else if (uMsg == WM_NCCALCSIZE && wParam == TRUE && IsThemeActive() && !IsHighContrast() && IsWindows11() && !IsDwmExtendFrameIntoClientAreaBrokenInThisBuild())
     {
         NCCALCSIZE_PARAMS* sz = (NCCALCSIZE_PARAMS*)(lParam);
         sz->rgrc[0].left += _this->border_thickness.left;
@@ -2628,18 +3746,7 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         return 0;
     }
     else if (uMsg == WM_PAINT)
-    {
-        if (IsThemeActive())
-        {
-            BOOL bIsCompositionEnabled = TRUE;
-            DwmIsCompositionEnabled(&bIsCompositionEnabled);
-            if (bIsCompositionEnabled)
-            {
-                MARGINS marGlassInset = { -1, -1, -1, -1 }; // -1 means the whole window
-                DwmExtendFrameIntoClientArea(hWnd, &marGlassInset);
-            }
-        }
-    
+    {    
         PAINTSTRUCT ps;
         HDC hDC = BeginPaint(hWnd, &ps);
 
@@ -2674,6 +3781,17 @@ static LRESULT CALLBACK GUI_WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         InvalidateRect(hWnd, NULL, FALSE);
         KillTimer(hWnd, GUI_TIMER_READ_REPEAT_SELECTION);
     }
+    else if (uMsg == WM_USER + 1)
+    {
+        SetTimer(hWnd, GUI_TIMER_REFRESH_FOR_PEOPLEBAND, GUI_TIMER_REFRESH_FOR_PEOPLEBAND_TIMEOUT, NULL);
+        return 0;
+    }
+    else if (uMsg == WM_TIMER && wParam == GUI_TIMER_REFRESH_FOR_PEOPLEBAND)
+    {
+        InvalidateRect(hWnd, NULL, FALSE);
+        KillTimer(hWnd, GUI_TIMER_REFRESH_FOR_PEOPLEBAND);
+        return 0;
+    }
     return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
@@ -2686,7 +3804,7 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
         return 0;
     }
 
-    HRESULT hr = CoInitialize(0);
+    HRESULT hr = CoInitializeEx(0, COINIT_APARTMENTTHREADED);
 
     HKEY hKey = NULL;
     DWORD dwSize = sizeof(DWORD);
@@ -2729,6 +3847,9 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
             );
         }
     }
+
+    wprintf(L"Running on Windows %d, OS Build %d.%d.%d.%d.\n", IsWindows11() ? 11 : 10, global_rovi.dwMajorVersion, global_rovi.dwMinorVersion, global_rovi.dwBuildNumber, global_ubr);
+
     locale = GetUserDefaultUILanguage();
     dwSize = LOCALE_NAME_MAX_LENGTH;
     if (hKey)
@@ -2741,6 +3862,26 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
             &locale,
             &dwSize
         );
+    }
+    BOOL bOk = FALSE;
+    ULONG ulNumLanguages = 0;
+    LPCWSTR wszLanguagesBuffer = NULL;
+    ULONG cchLanguagesBuffer = 0;
+    if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &ulNumLanguages, NULL, &cchLanguagesBuffer))
+    {
+        if (wszLanguagesBuffer = malloc(cchLanguagesBuffer * sizeof(WCHAR)))
+        {
+            if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &ulNumLanguages, wszLanguagesBuffer, &cchLanguagesBuffer))
+            {
+                wcscpy_s(wszLanguage, MAX_PATH, wszLanguagesBuffer);
+                bOk = TRUE;
+            }
+            free(wszLanguagesBuffer);
+        }
+    }
+    if (!bOk)
+    {
+        wcscpy_s(wszLanguage, MAX_PATH, L"en-US");
     }
 
     wchar_t wszPath[MAX_PATH];
@@ -2796,7 +3937,7 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
     _this.sidebarWidth = GUI_SIDEBAR_WIDTH;
     _this.hTheme = OpenThemeData(NULL, TEXT(GUI_WINDOWSWITCHER_THEME_CLASS));
     _this.tabOrder = 0;
-    _this.bCalcExtent = TRUE;
+    _this.bCalcExtent = 1;
     _this.section = 0;
     _this.dwStatusbarY = 0;
     _this.hIcon = NULL;
@@ -2832,16 +3973,15 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
     }
     RegisterClassW(&wc);
 
-    TCHAR title[260];
     _this.hExplorerFrame = LoadLibraryExW(L"ExplorerFrame.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
     if (_this.hExplorerFrame)
     {
-        LoadStringW(_this.hExplorerFrame, 50222, title, 260); // 726 = File Explorer
-        wchar_t* p = wcschr(title, L'(');
+        LoadStringW(_this.hExplorerFrame, 50222, GUI_title, 260); // 726 = File Explorer
+        wchar_t* p = wcschr(GUI_title, L'(');
         if (p)
         {
             p--;
-            if (p == L' ')
+            if (*p == L' ')
             {
                 *p = 0;
             }
@@ -2851,46 +3991,43 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
                 *p = 0;
             }
         }
-        if (title[0] == 0)
+        if (GUI_title[0] == 0)
         {
-            LoadStringW(hModule, IDS_PRODUCTNAME, title, 260);
+            LoadStringW(hModule, IDS_PRODUCTNAME, GUI_title, 260);
         }
     }
     else
     {
-        LoadStringW(hModule, IDS_PRODUCTNAME, title, 260);
+        LoadStringW(hModule, IDS_PRODUCTNAME, GUI_title, 260);
     }
-    HANDLE hUxtheme = NULL;
-    BOOL bHasLoadedUxtheme = FALSE;
     BOOL bIsCompositionEnabled = TRUE;
     DwmIsCompositionEnabled(&bIsCompositionEnabled);
-    if (IsThemeActive() && bIsCompositionEnabled)
+    HANDLE hUxtheme = NULL;
+    BOOL bHasLoadedUxtheme = FALSE;
+    bHasLoadedUxtheme = TRUE;
+    hUxtheme = LoadLibraryW(L"uxtheme.dll");
+    if (hUxtheme)
     {
-        bHasLoadedUxtheme = TRUE;
-        hUxtheme = LoadLibraryW(L"uxtheme.dll");
-        if (hUxtheme)
+        RefreshImmersiveColorPolicyState = GetProcAddress(hUxtheme, (LPCSTR)104);
+        SetPreferredAppMode = GetProcAddress(hUxtheme, (LPCSTR)135);
+        AllowDarkModeForWindow = GetProcAddress(hUxtheme, (LPCSTR)133);
+        ShouldAppsUseDarkMode = GetProcAddress(hUxtheme, (LPCSTR)132);
+        if (ShouldAppsUseDarkMode &&
+            SetPreferredAppMode &&
+            AllowDarkModeForWindow &&
+            RefreshImmersiveColorPolicyState
+            )
         {
-            RefreshImmersiveColorPolicyState = GetProcAddress(hUxtheme, (LPCSTR)104);
-            SetPreferredAppMode = GetProcAddress(hUxtheme, (LPCSTR)135);
-            AllowDarkModeForWindow = GetProcAddress(hUxtheme, (LPCSTR)133);
-            ShouldAppsUseDarkMode = GetProcAddress(hUxtheme, (LPCSTR)132);
-            if (ShouldAppsUseDarkMode &&
-                SetPreferredAppMode &&
-                AllowDarkModeForWindow &&
-                RefreshImmersiveColorPolicyState
-                )
-            {
-                SetPreferredAppMode(TRUE);
-                RefreshImmersiveColorPolicyState();
-                g_darkModeEnabled = IsThemeActive() && bIsCompositionEnabled && ShouldAppsUseDarkMode() && !IsHighContrast();
-            }
+            SetPreferredAppMode(TRUE);
+            RefreshImmersiveColorPolicyState();
+            g_darkModeEnabled = IsThemeActive() && bIsCompositionEnabled && ShouldAppsUseDarkMode() && !IsHighContrast();
         }
     }
     GUI_RegQueryValueExW(NULL, L"Virtualized_" _T(EP_CLSID) L"_TaskbarPosition", NULL, NULL, &dwTaskbarPosition, NULL);
     HWND hwnd = CreateWindowEx(
         NULL,
         L"ExplorerPatcher_GUI_" _T(EP_CLSID),
-        title,
+        GUI_title,
         WS_SYSMENU | WS_CAPTION | WS_MINIMIZEBOX,
         0,
         0,
@@ -2940,12 +4077,11 @@ __declspec(dllexport) int ZZGUI(HWND hWnd, HINSTANCE hInstance, LPSTR lpszCmdLin
         );
     }
 
-    if (IsThemeActive())
+    if (IsThemeActive() && !IsHighContrast() && IsWindows11())
     {
         if (bIsCompositionEnabled)
         {
-            BOOL value = 1;
-            DwmSetWindowAttribute(hwnd, DWMWA_MICA_EFFFECT, &value, sizeof(BOOL));
+            SetMicaMaterialForThisWindow(hwnd, TRUE);
             /*WTA_OPTIONS ops;
             ops.dwFlags = WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON;
             ops.dwMask = WTNCA_NODRAWCAPTION | WTNCA_NODRAWICON;
