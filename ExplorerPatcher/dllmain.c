@@ -13,6 +13,8 @@
 #include <Uxtheme.h>
 #pragma comment(lib, "UxTheme.lib")
 #include <Shlobj_core.h>
+#include <propvarutil.h>
+#pragma comment(lib, "Propsys.lib")
 #include <commctrl.h>
 #pragma comment(lib, "Comctl32.lib")
 #include <dwmapi.h>
@@ -37,10 +39,13 @@
 #ifdef _WIN64
 #include "../ep_weather_host/ep_weather_host_h.h"
 IEPWeather* epw = NULL;
-SRWLOCK lock_epw = { .Ptr = SRWLOCK_INIT };
+CRITICAL_SECTION lock_epw;
+int prev_total_h = 0;
+HWND PeopleButton_LastHWND = NULL;
 #endif
 #include "osutility.h"
-
+HANDLE hServiceWindowThread = NULL;
+//#pragma comment(lib, "Winmm.lib")
 #ifndef _WIN64
 RTL_OSVERSIONINFOW global_rovi;
 DWORD32 global_ubr;
@@ -78,6 +83,9 @@ DWORD bEnableArchivePlugin = FALSE;
 DWORD bMonitorOverride = TRUE;
 DWORD bOpenAtLogon = FALSE;
 DWORD bClockFlyoutOnWinC = FALSE;
+DWORD bUseClassicDriveGrouping = FALSE;
+DWORD dwFileExplorerCommandUI = 9999;
+DWORD bLegacyFileTransferDialog = FALSE;
 DWORD bDisableImmersiveContextMenu = FALSE;
 DWORD bClassicThemeMitigations = FALSE;
 DWORD bWasClassicThemeMitigationsSet = FALSE;
@@ -100,12 +108,14 @@ BOOL bDoNotRedirectProgramsAndFeaturesToSettingsApp = FALSE;
 BOOL bDoNotRedirectDateAndTimeToSettingsApp = FALSE;
 BOOL bDoNotRedirectNotificationIconsToSettingsApp = FALSE;
 BOOL bDisableOfficeHotkeys = FALSE;
+BOOL bDisableWinFHotkey = FALSE;
 DWORD bNoPropertiesInContextMenu = FALSE;
 #define TASKBARGLOMLEVEL_DEFAULT 2
 #define MMTASKBARGLOMLEVEL_DEFAULT 2
 DWORD dwTaskbarGlomLevel = TASKBARGLOMLEVEL_DEFAULT;
 DWORD dwMMTaskbarGlomLevel = MMTASKBARGLOMLEVEL_DEFAULT;
 HMODULE hModule = NULL;
+HANDLE hShell32 = NULL;
 HANDLE hDelayedInjectionThread = NULL;
 HANDLE hIsWinXShown = NULL;
 HANDLE hWinXThread = NULL;
@@ -842,6 +852,21 @@ DWORD EP_ServiceWindowThread(DWORD unused)
             {
                 break;
             }
+            else if (!msg.hwnd)
+            {
+                if (msg.message == WM_USER + 1)
+                {
+                    EnterCriticalSection(&lock_epw);
+                    if (epw)
+                    {
+                        epw = NULL;
+                        prev_total_h = 0;
+                        if (PeopleButton_LastHWND) InvalidateRect(PeopleButton_LastHWND, NULL, TRUE);
+                        //PlaySoundA((LPCTSTR)SND_ALIAS_SYSTEMASTERISK, NULL, SND_ALIAS_ID);
+                    }
+                    LeaveCriticalSection(&lock_epw);
+                }
+            }
             else
             {
                 TranslateMessage(&msg);
@@ -857,6 +882,8 @@ DWORD EP_ServiceWindowThread(DWORD unused)
 
 
 #pragma region "Toggle shell features"
+// More details in explorer.exe!CTray::_HandleGlobalHotkey
+
 BOOL CALLBACK ToggleImmersiveCallback(HWND hWnd, LPARAM lParam)
 {
     WORD ClassWord;
@@ -1910,7 +1937,7 @@ int HandleTaskbarCornerInteraction(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
                 OpenStartOnMonitor(hMonitor);
                 return 1;
             }
-            DWORD dwVal = 0, dwSize = sizeof(DWORD);
+            DWORD dwVal = 1, dwSize = sizeof(DWORD);
             RegGetValueW(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", L"TaskbarAl", RRF_RT_DWORD, NULL, &dwVal, &dwSize);
             if (dwVal)
             {
@@ -4060,13 +4087,7 @@ FARPROC explorer_GetProcAddressHook(HMODULE hModule, const CHAR* lpProcName)
 #ifdef _WIN64
 LRESULT explorer_SendMessageW(HWND hWndx, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    if (uMsg == 0x579) // "Raise desktop" - basically shows desktop or the windows
-                       // wParam = 3 => show desktop
-                       // wParam = 2 => raise windows
-    {
-        
-    }
-    else if (uMsg == TB_GETTEXTROWS)
+    if (uMsg == TB_GETTEXTROWS)
     {
         HWND hWnd = FindWindowEx(
             NULL,
@@ -4184,7 +4205,6 @@ void stub1(void* i)
 {
 }
 
-HWND PeopleButton_LastHWND = NULL;
 #define WEATHER_FIXEDSIZE2_MAXWIDTH 192
 BOOL explorer_DeleteMenu(HMENU hMenu, UINT uPosition, UINT uFlags)
 {
@@ -4281,14 +4301,13 @@ void RecomputeWeatherFlyoutLocation(HWND hWnd)
     SetWindowPos(hWnd, NULL, pNewWindow.x, pNewWindow.y, 0, 0, SWP_NOSIZE | SWP_NOSENDCHANGING);
 }
 
-int prev_total_h = 0;
 BOOL people_has_ellipsed = FALSE;
 SIZE (*PeopleButton_CalculateMinimumSizeFunc)(void*, SIZE*);
 SIZE WINAPI PeopleButton_CalculateMinimumSizeHook(void* _this, SIZE* pSz)
 {
     SIZE ret = PeopleButton_CalculateMinimumSizeFunc(_this, pSz);
-    AcquireSRWLockShared(&lock_epw);
-    if (epw)
+    BOOL bHasLocked = TryEnterCriticalSection(&lock_epw);
+    if (bHasLocked && epw)
     {
         if (bWeatherFixedSize == 1)
         {
@@ -4322,106 +4341,110 @@ SIZE WINAPI PeopleButton_CalculateMinimumSizeHook(void* _this, SIZE* pSz)
                 pSz->cx = prev_total_h;
             }
         }
-    }
-    //printf("[CalculateMinimumSize] %d %d\n", pSz->cx, pSz->cy);
-    if (pSz->cy && epw)
-    {
-        BOOL bIsInitialized = TRUE;
-        HRESULT hr = epw->lpVtbl->IsInitialized(epw, &bIsInitialized);
-        if (SUCCEEDED(hr))
+        //printf("[CalculateMinimumSize] %d %d\n", pSz->cx, pSz->cy);
+        if (pSz->cy)
         {
-            int rt = MulDiv(48, pSz->cy, 60);
-            if (!bIsInitialized)
+            BOOL bIsInitialized = TRUE;
+            HRESULT hr = epw->lpVtbl->IsInitialized(epw, &bIsInitialized);
+            if (SUCCEEDED(hr))
             {
-                ReleaseSRWLockShared(&lock_epw);
-                AcquireSRWLockExclusive(&lock_epw);
-                epw->lpVtbl->SetTerm(epw, MAX_PATH * sizeof(WCHAR), wszWeatherTerm);
-                epw->lpVtbl->SetLanguage(epw, MAX_PATH * sizeof(WCHAR), wszWeatherLanguage);
-                epw->lpVtbl->SetDevMode(epw, dwWeatherDevMode, FALSE);
-                epw->lpVtbl->SetIconPack(epw, dwWeatherIconPack, FALSE);
-                UINT dpiX = 0, dpiY = 0;
-                HMONITOR hMonitor = MonitorFromWindow(PeopleButton_LastHWND, MONITOR_DEFAULTTOPRIMARY);
-                HRESULT hr = GetDpiForMonitor(hMonitor, MDT_DEFAULT, &dpiX, &dpiY);
-                MONITORINFO mi;
-                ZeroMemory(&mi, sizeof(MONITORINFO));
-                mi.cbSize = sizeof(MONITORINFO);
-                if (GetMonitorInfoW(hMonitor, &mi))
+                int rt = MulDiv(48, pSz->cy, 60);
+                if (!bIsInitialized)
                 {
-                    DWORD dwTextScaleFactor = 0, dwSize = sizeof(DWORD);
-                    if (SHRegGetValueFromHKCUHKLMFunc && SHRegGetValueFromHKCUHKLMFunc(
-                        TEXT("SOFTWARE\\Microsoft\\Accessibility"),
-                        TEXT("TextScaleFactor"),
-                        SRRF_RT_REG_DWORD,
-                        NULL,
-                        &dwTextScaleFactor,
-                        (LPDWORD)(&dwSize)
-                    ) != ERROR_SUCCESS)
+                    epw->lpVtbl->SetTerm(epw, MAX_PATH * sizeof(WCHAR), wszWeatherTerm);
+                    epw->lpVtbl->SetLanguage(epw, MAX_PATH * sizeof(WCHAR), wszWeatherLanguage);
+                    epw->lpVtbl->SetDevMode(epw, dwWeatherDevMode, FALSE);
+                    epw->lpVtbl->SetIconPack(epw, dwWeatherIconPack, FALSE);
+                    UINT dpiX = 0, dpiY = 0;
+                    HMONITOR hMonitor = MonitorFromWindow(PeopleButton_LastHWND, MONITOR_DEFAULTTOPRIMARY);
+                    HRESULT hr = GetDpiForMonitor(hMonitor, MDT_DEFAULT, &dpiX, &dpiY);
+                    MONITORINFO mi;
+                    ZeroMemory(&mi, sizeof(MONITORINFO));
+                    mi.cbSize = sizeof(MONITORINFO);
+                    if (GetMonitorInfoW(hMonitor, &mi))
                     {
-                        dwTextScaleFactor = 100;
-                    }
-
-                    RECT rcWeatherFlyoutWindow;
-                    rcWeatherFlyoutWindow.left = mi.rcWork.left;
-                    rcWeatherFlyoutWindow.top = mi.rcWork.top;
-                    rcWeatherFlyoutWindow.right = rcWeatherFlyoutWindow.left + MulDiv(MulDiv(MulDiv(EP_WEATHER_WIDTH, dpiX, 96), dwTextScaleFactor, 100), dwWeatherZoomFactor, 100);
-                    rcWeatherFlyoutWindow.bottom = rcWeatherFlyoutWindow.top + MulDiv(MulDiv(MulDiv(EP_WEATHER_HEIGHT, dpiX, 96), dwTextScaleFactor, 100), dwWeatherZoomFactor, 100);
-                    int k = 0;
-                    while (FAILED(hr = epw->lpVtbl->Initialize(epw, wszEPWeatherKillswitch, bAllocConsole, EP_WEATHER_PROVIDER_GOOGLE, rt, rt, dwWeatherTemperatureUnit, dwWeatherUpdateSchedule * 1000, rcWeatherFlyoutWindow, dwWeatherTheme, dwWeatherGeolocationMode, &hWndWeatherFlyout, dwWeatherZoomFactor ? dwWeatherZoomFactor : 100, dpiX, dpiY)))
-                    {
-                        BOOL bFailed = FALSE;
-                        if (k == 0 && hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
+                        DWORD dwTextScaleFactor = 0, dwSize = sizeof(DWORD);
+                        if (SHRegGetValueFromHKCUHKLMFunc && SHRegGetValueFromHKCUHKLMFunc(
+                            TEXT("SOFTWARE\\Microsoft\\Accessibility"),
+                            TEXT("TextScaleFactor"),
+                            SRRF_RT_REG_DWORD,
+                            NULL,
+                            &dwTextScaleFactor,
+                            (LPDWORD)(&dwSize)
+                        ) != ERROR_SUCCESS)
                         {
-                            if (DownloadAndInstallWebView2Runtime())
+                            dwTextScaleFactor = 100;
+                        }
+
+                        RECT rcWeatherFlyoutWindow;
+                        rcWeatherFlyoutWindow.left = mi.rcWork.left;
+                        rcWeatherFlyoutWindow.top = mi.rcWork.top;
+                        rcWeatherFlyoutWindow.right = rcWeatherFlyoutWindow.left + MulDiv(MulDiv(MulDiv(EP_WEATHER_WIDTH, dpiX, 96), dwTextScaleFactor, 100), dwWeatherZoomFactor, 100);
+                        rcWeatherFlyoutWindow.bottom = rcWeatherFlyoutWindow.top + MulDiv(MulDiv(MulDiv(EP_WEATHER_HEIGHT, dpiX, 96), dwTextScaleFactor, 100), dwWeatherZoomFactor, 100);
+                        int k = 0;
+                        while (FAILED(hr = epw->lpVtbl->Initialize(epw, wszEPWeatherKillswitch, bAllocConsole, EP_WEATHER_PROVIDER_GOOGLE, rt, rt, dwWeatherTemperatureUnit, dwWeatherUpdateSchedule * 1000, rcWeatherFlyoutWindow, dwWeatherTheme, dwWeatherGeolocationMode, &hWndWeatherFlyout, dwWeatherZoomFactor ? dwWeatherZoomFactor : 100, dpiX, dpiY)))
+                        {
+                            BOOL bFailed = FALSE;
+                            if (k == 0 && hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
                             {
-                                k++;
+                                if (DownloadAndInstallWebView2Runtime())
+                                {
+                                    k++;
+                                }
+                                else
+                                {
+                                    bFailed = TRUE;
+                                }
                             }
                             else
                             {
                                 bFailed = TRUE;
                             }
+                            if (bFailed)
+                            {
+                                epw->lpVtbl->Release(epw);
+                                epw = NULL;
+                                prev_total_h = 0;
+                                PostMessageW(FindWindowW(L"Shell_TrayWnd", NULL), WM_COMMAND, 435, 0);
+                                PostMessageW(FindWindowW(L"ExplorerPatcher_GUI_" _T(EP_CLSID), NULL), WM_USER + 1, 0, 0);
+                                break;
+                            }
                         }
-                        else
+                        if (SUCCEEDED(hr))
                         {
-                            bFailed = TRUE;
+                            epw->lpVtbl->SetWindowCornerPreference(epw, dwWeatherWindowCornerPreference);
                         }
-                        if (bFailed)
-                        {
-                            epw->lpVtbl->Release(epw);
-                            epw = NULL;
-                            prev_total_h = 0;
-                            PostMessageW(FindWindowW(L"Shell_TrayWnd", NULL), WM_COMMAND, 435, 0);
-                            PostMessageW(FindWindowW(L"ExplorerPatcher_GUI_" _T(EP_CLSID), NULL), WM_USER + 1, 0, 0);
-                            break;
-                        }
-                    }
-                    if (SUCCEEDED(hr))
-                    {
-                        epw->lpVtbl->SetWindowCornerPreference(epw, dwWeatherWindowCornerPreference);
                     }
                 }
-                ReleaseSRWLockExclusive(&lock_epw);
-                AcquireSRWLockShared(&lock_epw);
+                else
+                {
+                    epw->lpVtbl->SetIconSize(epw, rt, rt);
+                }
             }
             else
             {
-                epw->lpVtbl->SetIconSize(epw, rt, rt);
+                if (hr == 0x800706ba) // RPC server is unavailable
+                {
+                    //ReleaseSRWLockShared(&lock_epw);
+                    /*AcquireSRWLockExclusive(&lock_epw);
+                    epw = NULL;
+                    prev_total_h = 0;
+                    InvalidateRect(PeopleButton_LastHWND, NULL, TRUE);
+                    ReleaseSRWLockExclusive(&lock_epw);*/
+                    if (hServiceWindowThread) PostThreadMessageW(GetThreadId(hServiceWindowThread), WM_USER + 1, NULL, NULL);
+                    //AcquireSRWLockShared(&lock_epw);
+                }
             }
         }
-        else
+        LeaveCriticalSection(&lock_epw);
+    }
+    else
+    {
+        if (bHasLocked)
         {
-            if (hr == 0x800706ba) // RPC server is unavailable
-            {
-                ReleaseSRWLockShared(&lock_epw);
-                AcquireSRWLockExclusive(&lock_epw);
-                epw = NULL;
-                prev_total_h = 0;
-                InvalidateRect(PeopleButton_LastHWND, NULL, TRUE);
-                ReleaseSRWLockExclusive(&lock_epw);
-                AcquireSRWLockShared(&lock_epw);
-            }
+            LeaveCriticalSection(&lock_epw);
         }
     }
-    ReleaseSRWLockShared(&lock_epw);
     return ret;
 }
 
@@ -4430,8 +4453,8 @@ int PeopleBand_MulDivHook(int nNumber, int nNumerator, int nDenominator)
     if (nNumber != 46) // 46 = vertical taskbar, 48 = horizontal taskbar
     {
         //printf("[MulDivHook] %d %d %d\n", nNumber, nNumerator, nDenominator);
-        AcquireSRWLockShared(&lock_epw);
-        if (epw)
+        BOOL bHasLocked = TryEnterCriticalSection(&lock_epw);
+        if (bHasLocked && epw)
         {
             if (bWeatherFixedSize == 1)
             {
@@ -4452,25 +4475,32 @@ int PeopleBand_MulDivHook(int nNumber, int nNumerator, int nDenominator)
                     mul = 1;
                     break;
                 }
-                ReleaseSRWLockShared(&lock_epw);
+                LeaveCriticalSection(&lock_epw);
                 return MulDiv(nNumber * mul, nNumerator, nDenominator);
             }
             else
             {
                 if (prev_total_h)
                 {
-                    ReleaseSRWLockShared(&lock_epw);
+                    LeaveCriticalSection(&lock_epw);
                     return prev_total_h;
                 }
                 else
                 {
                     prev_total_h = MulDiv(nNumber, nNumerator, nDenominator);
-                    ReleaseSRWLockShared(&lock_epw);
+                    LeaveCriticalSection(&lock_epw);
                     return prev_total_h;
                 }
             }
+            LeaveCriticalSection(&lock_epw);
         }
-        ReleaseSRWLockShared(&lock_epw);
+        else
+        {
+            if (bHasLocked)
+            {
+                LeaveCriticalSection(&lock_epw);
+            }
+        }
     }
     return MulDiv(nNumber, nNumerator, nDenominator);
 }
@@ -4510,8 +4540,8 @@ __int64 __fastcall PeopleBand_DrawTextWithGlowHook(
     int(__stdcall* a11)(HDC, unsigned __int16*, int, struct tagRECT*, unsigned int, __int64),
     __int64 a12)
 {
-    AcquireSRWLockShared(&lock_epw);
-    if (a5 == 0x21 && epw)
+    BOOL bHasLocked = FALSE;
+    if (a5 == 0x21 && (bHasLocked = TryEnterCriticalSection(&lock_epw)) && epw)
     {
         people_has_ellipsed = FALSE;
 
@@ -4909,24 +4939,28 @@ __int64 __fastcall PeopleBand_DrawTextWithGlowHook(
             //printf("444444444444 0x%x\n", hr);
             if (hr == 0x800706ba) // RPC server is unavailable
             {
-                ReleaseSRWLockShared(&lock_epw);
-                AcquireSRWLockExclusive(&lock_epw);
+                //ReleaseSRWLockShared(&lock_epw);
+                /*AcquireSRWLockExclusive(&lock_epw);
                 epw = NULL;
                 prev_total_h = 0;
                 InvalidateRect(PeopleButton_LastHWND, NULL, TRUE); 
-                ReleaseSRWLockExclusive(&lock_epw);
-                AcquireSRWLockShared(&lock_epw);
+                ReleaseSRWLockExclusive(&lock_epw);*/
+                if (hServiceWindowThread) PostThreadMessageW(GetThreadId(hServiceWindowThread), WM_USER + 1, NULL, NULL);
+                //AcquireSRWLockShared(&lock_epw);
             }
         }
 
         //printf("hr %x\n", hr);
 
-        ReleaseSRWLockShared(&lock_epw);
+        LeaveCriticalSection(&lock_epw);
         return S_OK;
     }
     else
     {
-        ReleaseSRWLockShared(&lock_epw);
+        if (bHasLocked)
+        {
+            LeaveCriticalSection(&lock_epw);
+        }
         return PeopleBand_DrawTextWithGlowFunc(hdc, a2, a3, a4, a5, a6, a7, dy, a9, a10, a11, a12);
     }
 }
@@ -4934,8 +4968,8 @@ __int64 __fastcall PeopleBand_DrawTextWithGlowHook(
 void(*PeopleButton_ShowTooltipFunc)(__int64 a1, unsigned __int8 bShow) = 0;
 void WINAPI PeopleButton_ShowTooltipHook(__int64 _this, unsigned __int8 bShow)
 {
-    AcquireSRWLockShared(&lock_epw);
-    if (epw)
+    BOOL bHasLocked = TryEnterCriticalSection(&lock_epw);
+    if (bHasLocked && epw)
     {
         if (bShow)
         {
@@ -4968,9 +5002,14 @@ void WINAPI PeopleButton_ShowTooltipHook(__int64 _this, unsigned __int8 bShow)
                 epw->lpVtbl->UnlockData(epw);
             }
         }
+        LeaveCriticalSection(&lock_epw);
     }
     else
     {
+        if (bHasLocked)
+        {
+            LeaveCriticalSection(&lock_epw);
+        }
         WCHAR wszBuffer[MAX_PATH];
         ZeroMemory(wszBuffer, sizeof(WCHAR) * MAX_PATH);
         LoadStringW(GetModuleHandle(NULL), 912, wszBuffer, MAX_PATH);
@@ -4985,7 +5024,6 @@ void WINAPI PeopleButton_ShowTooltipHook(__int64 _this, unsigned __int8 bShow)
             SendMessageW((HWND) * ((INT64*)_this + 10), TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
         }
     }
-    ReleaseSRWLockShared(&lock_epw);
     if (PeopleButton_ShowTooltipFunc)
     {
         return PeopleButton_ShowTooltipFunc(_this, bShow);
@@ -4996,8 +5034,8 @@ void WINAPI PeopleButton_ShowTooltipHook(__int64 _this, unsigned __int8 bShow)
 __int64 (*PeopleButton_OnClickFunc)(__int64 a1, __int64 a2) = 0;
 __int64 PeopleButton_OnClickHook(__int64 a1, __int64 a2)
 {
-    AcquireSRWLockShared(&lock_epw);
-    if (epw)
+    BOOL bHasLocked = TryEnterCriticalSection(&lock_epw);
+    if (bHasLocked && epw)
     {
         if (!hWndWeatherFlyout)
         {
@@ -5026,12 +5064,15 @@ __int64 PeopleButton_OnClickHook(__int64 a1, __int64 a2)
                 SwitchToThisWindow(hWndWeatherFlyout, TRUE);
             }
         }
-        ReleaseSRWLockShared(&lock_epw);
+        LeaveCriticalSection(&lock_epw);
         return 0;
     }
     else
     {
-        ReleaseSRWLockShared(&lock_epw);
+        if (bHasLocked)
+        {
+            LeaveCriticalSection(&lock_epw);
+        }
         if (PeopleButton_OnClickFunc)
         {
             return PeopleButton_OnClickFunc(a1, a2);
@@ -5052,7 +5093,7 @@ INT64 PeopleButton_SubclassProc(
     if (uMsg == WM_NCDESTROY)
     {
         RemoveWindowSubclass(hWnd, PeopleButton_SubclassProc, PeopleButton_SubclassProc);
-        AcquireSRWLockExclusive(&lock_epw);
+        /*AcquireSRWLockExclusive(&lock_epw);
         if (epw)
         {
             epw->lpVtbl->Release(epw);
@@ -5060,7 +5101,8 @@ INT64 PeopleButton_SubclassProc(
             PeopleButton_LastHWND = NULL;
             prev_total_h = 0;
         }
-        ReleaseSRWLockExclusive(&lock_epw);
+        ReleaseSRWLockExclusive(&lock_epw);*/
+        if (hServiceWindowThread) PostThreadMessageW(GetThreadId(hServiceWindowThread), WM_USER + 1, NULL, NULL);
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
@@ -5170,7 +5212,7 @@ BOOL explorer_SetChildWindowNoActivateHook(HWND hWnd)
                     PeopleButton_LastHWND = hWnd;
                     SetWindowSubclass(hWnd, PeopleButton_SubclassProc, PeopleButton_SubclassProc, 0);
 
-                    AcquireSRWLockExclusive(&lock_epw);
+                    EnterCriticalSection(&lock_epw);
                     if (!epw)
                     {
                         if (SUCCEEDED(CoCreateInstance(&CLSID_EPWeather, NULL, CLSCTX_LOCAL_SERVER, &IID_IEPWeather, &epw)) && epw)
@@ -5187,7 +5229,7 @@ BOOL explorer_SetChildWindowNoActivateHook(HWND hWnd)
                             SetWindowTextW(hWnd, wszBuffer);
                         }
                     }
-                    ReleaseSRWLockExclusive(&lock_epw);
+                    LeaveCriticalSection(&lock_epw);
                 }
             }
         }
@@ -5861,6 +5903,46 @@ void WINAPI LoadSettings(LPARAM lParam)
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
             hKey,
+            TEXT("UseClassicDriveGrouping"),
+            0,
+            NULL,
+            &bUseClassicDriveGrouping,
+            &dwSize
+        );
+        dwSize = sizeof(DWORD);
+        RegQueryValueExW(
+            hKey,
+            TEXT("FileExplorerCommandUI"),
+            0,
+            NULL,
+            &dwFileExplorerCommandUI,
+            &dwSize
+        );
+        if (dwFileExplorerCommandUI == 9999)
+        {
+            if (IsWindows11())
+            {
+                DWORD bIsWindows11CommandBarDisabled = (RegGetValueW(HKEY_CURRENT_USER, L"SOFTWARE\\Classes\\CLSID\\{d93ed569-3b3e-4bff-8355-3c44f6a52bb5}\\InProcServer32", L"", RRF_RT_REG_SZ, NULL, NULL, NULL) == ERROR_SUCCESS);
+                RegSetValueExW(hKey, L"FileExplorerCommandUI", 0, REG_DWORD, &bIsWindows11CommandBarDisabled, sizeof(DWORD));
+                dwFileExplorerCommandUI = bIsWindows11CommandBarDisabled;
+            }
+            else
+            {
+                dwFileExplorerCommandUI = 0;
+            }
+        }
+        dwSize = sizeof(DWORD);
+        RegQueryValueExW(
+            hKey,
+            TEXT("LegacyFileTransferDialog"),
+            0,
+            NULL,
+            &bLegacyFileTransferDialog,
+            &dwSize
+        );
+        dwSize = sizeof(DWORD);
+        RegQueryValueExW(
+            hKey,
             TEXT("DisableImmersiveContextMenu"),
             0,
             NULL,
@@ -6230,6 +6312,15 @@ void WINAPI LoadSettings(LPARAM lParam)
             &bDisableOfficeHotkeys,
             &dwSize
         );
+        dwSize = sizeof(DWORD);
+        RegQueryValueExW(
+            hKey,
+            TEXT("DisableWinFHotkey"),
+            0,
+            NULL,
+            &bDisableWinFHotkey,
+            &dwSize
+        );
         dwTemp = FALSE;
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
@@ -6279,7 +6370,7 @@ void WINAPI LoadSettings(LPARAM lParam)
         );
 
 #ifdef _WIN64
-        AcquireSRWLockShared(&lock_epw);
+        EnterCriticalSection(&lock_epw);
 
         DWORD dwOldWeatherTemperatureUnit = dwWeatherTemperatureUnit;
         dwSize = sizeof(DWORD);
@@ -6570,7 +6661,7 @@ void WINAPI LoadSettings(LPARAM lParam)
             }
         }
 
-        ReleaseSRWLockShared(&lock_epw);
+        LeaveCriticalSection(&lock_epw);
 #endif
 
         dwTemp = TASKBARGLOMLEVEL_DEFAULT;
@@ -7247,15 +7338,6 @@ HRESULT explorer_SetWindowThemeHook(
     return explorer_SetWindowThemeFunc(hwnd, pszSubAppName, pszSubIdList);
 }
 
-INT64 explorer_SetWindowCompositionAttribute(HWND hWnd, WINCOMPATTRDATA* data)
-{
-    if (bClassicThemeMitigations)
-    {
-        return TRUE;
-    }
-    return SetWindowCompositionAttribute(hWnd, data);
-}
-
 HDPA hOrbCollection = NULL;
 HRESULT explorer_DrawThemeBackground(
     HTHEME  hTheme,
@@ -7914,6 +7996,269 @@ HINSTANCE explorer_ShellExecuteW(
 #pragma endregion
 
 
+#pragma region "Classic Drive Grouping"
+#ifdef _WIN64
+const struct { DWORD dwDescriptionId; UINT uResourceId; } driveCategoryMap[] = {
+    { SHDID_FS_DIRECTORY,        9338 }, //shell32
+    { SHDID_COMPUTER_SHAREDDOCS, 9338 }, //shell32
+    { SHDID_COMPUTER_FIXED,      IDS_DRIVECATEGORY_HARDDISKDRIVES },
+    { SHDID_COMPUTER_DRIVE35,    IDS_DRIVECATEGORY_REMOVABLESTORAGE },
+    { SHDID_COMPUTER_REMOVABLE,  IDS_DRIVECATEGORY_REMOVABLESTORAGE },
+    { SHDID_COMPUTER_CDROM,      IDS_DRIVECATEGORY_REMOVABLESTORAGE },
+    { SHDID_COMPUTER_DRIVE525,   IDS_DRIVECATEGORY_REMOVABLESTORAGE },
+    { SHDID_COMPUTER_NETDRIVE,   9340 }, //shell32
+    { SHDID_COMPUTER_OTHER,      IDS_DRIVECATEGORY_OTHER },
+    { SHDID_COMPUTER_RAMDISK,    IDS_DRIVECATEGORY_OTHER },
+    { SHDID_COMPUTER_IMAGING,    IDS_DRIVECATEGORY_IMAGING },
+    { SHDID_COMPUTER_AUDIO,      IDS_DRIVECATEGORY_PORTABLEMEDIADEVICE },
+    { SHDID_MOBILE_DEVICE,       IDS_DRIVECATEGORY_PORTABLEDEVICE }
+};
+
+//Represents the true data structure that is returned from shell32!DllGetClassObject
+typedef struct {
+    const IClassFactoryVtbl* lpVtbl;
+    ULONG flags;
+    REFCLSID rclsid;
+    HRESULT(*pfnCreateInstance)(IUnknown*, REFIID, void**);
+} Shell32ClassFactoryEntry;
+
+//Represents a custom ICategorizer/IShellExtInit
+typedef struct _EPCategorizer
+{
+    ICategorizerVtbl* categorizer;
+    IShellExtInitVtbl* shellExtInit;
+
+    ULONG ulRefCount;
+    IShellFolder2* pShellFolder;
+} EPCategorizer;
+
+#pragma region "EPCategorizer: ICategorizer"
+
+HRESULT STDMETHODCALLTYPE EPCategorizer_ICategorizer_QueryInterface(ICategorizer* _this, REFIID riid, void** ppvObject)
+{
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_ICategorizer))
+    {
+        *ppvObject = _this;
+    }
+    else if (IsEqualIID(riid, &IID_IShellExtInit))
+    {
+        *ppvObject = &((EPCategorizer*) _this)->shellExtInit;
+    }
+    else
+    {
+        ppvObject = NULL;
+        return E_NOINTERFACE;
+    }
+
+    _this->lpVtbl->AddRef(_this);
+
+    return S_OK;
+}
+
+ULONG STDMETHODCALLTYPE EPCategorizer_ICategorizer_AddRef(ICategorizer* _this)
+{
+    return InterlockedIncrement(&((EPCategorizer*)_this)->ulRefCount);
+}
+
+ULONG STDMETHODCALLTYPE EPCategorizer_ICategorizer_Release(ICategorizer* _this)
+{
+    ULONG ulNewCount = InterlockedDecrement(&((EPCategorizer*)_this)->ulRefCount);
+
+    //When the window is closed or refreshed the object is finally freed
+    if (ulNewCount == 0)
+    {
+        EPCategorizer* epCategorizer = (EPCategorizer*)_this;
+
+        if (epCategorizer->pShellFolder != NULL)
+        {
+            epCategorizer->pShellFolder->lpVtbl->Release(epCategorizer->pShellFolder);
+            epCategorizer->pShellFolder = NULL;
+        }
+
+        free(epCategorizer);
+    }
+
+    return ulNewCount;
+}
+
+HRESULT STDMETHODCALLTYPE EPCategorizer_ICategorizer_GetDescription(ICategorizer* _this, LPWSTR pszDesc, UINT cch)
+{
+    //As of writing returns the string "Type". Same implementation as shell32!CStorageSystemTypeCategorizer::GetDescription
+    LoadStringW(hShell32, 0x3105, pszDesc, cch);
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE EPCategorizer_ICategorizer_GetCategory(ICategorizer* _this, UINT cidl, PCUITEMID_CHILD_ARRAY apidl, DWORD* rgCategoryIds)
+{
+    EPCategorizer* epCategorizer = (EPCategorizer*)_this;
+
+    HRESULT hr = S_OK;
+
+    for (UINT i = 0; i < cidl; i++)
+    {
+        rgCategoryIds[i] = IDS_DRIVECATEGORY_OTHER;
+
+        PROPERTYKEY key = { FMTID_ShellDetails, PID_DESCRIPTIONID };
+        VARIANT variant;
+        VariantInit(&variant);
+
+        hr = epCategorizer->pShellFolder->lpVtbl->GetDetailsEx(epCategorizer->pShellFolder, apidl[i], &key, &variant);
+
+        if (SUCCEEDED(hr))
+        {
+            SHDESCRIPTIONID did;
+
+            if (SUCCEEDED(VariantToBuffer(&variant, &did, sizeof(did))))
+            {
+                for (int j = 0; j < ARRAYSIZE(driveCategoryMap); j++)
+                {
+                    if (did.dwDescriptionId == driveCategoryMap[j].dwDescriptionId)
+                    {
+                        rgCategoryIds[i] = driveCategoryMap[j].uResourceId;
+                        break;
+                    }
+                }
+            }
+
+            VariantClear(&variant);
+        }
+    }
+
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE EPCategorizer_ICategorizer_GetCategoryInfo(ICategorizer* _this, DWORD dwCategoryId, CATEGORY_INFO* pci)
+{
+    //Now retrieve the display name to use for the resource ID dwCategoryId.
+    //pci is already populated with most of the information it needs, we just need to fill in the wszName
+    if (!LoadStringW(hModule, dwCategoryId, pci->wszName, ARRAYSIZE(pci->wszName)))
+        LoadStringW(hShell32, dwCategoryId, pci->wszName, ARRAYSIZE(pci->wszName));
+
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE EPCategorizer_ICategorizer_CompareCategory(ICategorizer* _this, CATSORT_FLAGS csfFlags, DWORD dwCategoryId1, DWORD dwCategoryId2)
+{
+    //Typically a categorizer would use the resource IDs containing the names of each category as the "category ID" as well. In our case however, we're using
+    //a combination of resource/category IDs provided by shell32 and resource/category IDs we're overriding ourselves. As a result, we are forced to compare
+    //not by the value of the category/resource IDs themselves, but by their _position_ within our category ID map
+
+    int categoryArraySize = ARRAYSIZE(driveCategoryMap);
+
+    int firstPos = -1;
+    int secondPos = -1;
+
+    for (int i = 0; i < categoryArraySize; i++)
+    {
+        if (driveCategoryMap[i].uResourceId == dwCategoryId1)
+        {
+            firstPos = i;
+            break;
+        }
+    }
+
+    for (int i = 0; i < categoryArraySize; i++)
+    {
+        if (driveCategoryMap[i].uResourceId == dwCategoryId2)
+        {
+            secondPos = i;
+            break;
+        }
+    }
+
+    int diff = firstPos - secondPos;
+
+    if (diff < 0)
+        return 0xFFFF;
+
+    return diff > 0;
+}
+
+#pragma endregion
+#pragma region "EPCategorizer: IShellExtInit"
+
+//Adjustor Thunks: https://devblogs.microsoft.com/oldnewthing/20040206-00/?p=40723
+HRESULT STDMETHODCALLTYPE EPCategorizer_IShellExtInit_QueryInterface(IShellExtInit* _this, REFIID riid, void** ppvObject)
+{
+    return EPCategorizer_ICategorizer_QueryInterface((ICategorizer*)((char*)_this - sizeof(IShellExtInitVtbl*)), riid, ppvObject);
+}
+
+ULONG STDMETHODCALLTYPE EPCategorizer_IShellExtInit_AddRef(IShellExtInit* _this)
+{
+    return EPCategorizer_ICategorizer_AddRef((ICategorizer*)((char*)_this - sizeof(IShellExtInitVtbl*)));
+}
+
+ULONG STDMETHODCALLTYPE EPCategorizer_IShellExtInit_Release(IShellExtInit* _this)
+{
+    return EPCategorizer_ICategorizer_Release((ICategorizer*)((char*)_this - sizeof(IShellExtInitVtbl*)));
+}
+
+HRESULT STDMETHODCALLTYPE EPCategorizer_IShellExtInit_Initialize(IShellExtInit* _this, PCIDLIST_ABSOLUTE pidlFolder, IDataObject* pdtobj, HKEY hkeyProgID)
+{
+    EPCategorizer* epCategorizer = (EPCategorizer*)((char*)_this - sizeof(IShellExtInitVtbl*));
+
+    return SHBindToObject(NULL, pidlFolder, NULL, &IID_IShellFolder2, (void**)&epCategorizer->pShellFolder);
+}
+
+#pragma endregion
+
+const ICategorizerVtbl EPCategorizer_categorizerVtbl = {
+    EPCategorizer_ICategorizer_QueryInterface,
+    EPCategorizer_ICategorizer_AddRef,
+    EPCategorizer_ICategorizer_Release,
+    EPCategorizer_ICategorizer_GetDescription,
+    EPCategorizer_ICategorizer_GetCategory,
+    EPCategorizer_ICategorizer_GetCategoryInfo,
+    EPCategorizer_ICategorizer_CompareCategory
+};
+
+const IShellExtInitVtbl EPCategorizer_shellExtInitVtbl = {
+    EPCategorizer_IShellExtInit_QueryInterface,
+    EPCategorizer_IShellExtInit_AddRef,
+    EPCategorizer_IShellExtInit_Release,
+    EPCategorizer_IShellExtInit_Initialize
+};
+
+HRESULT(STDMETHODCALLTYPE *shell32_DriveTypeCategorizer_CreateInstanceFunc)(IUnknown* pUnkOuter, REFIID riid, void** ppvObject);
+
+HRESULT shell32_DriveTypeCategorizer_CreateInstanceHook(IUnknown* pUnkOuter, REFIID riid, void** ppvObject)
+{
+    if (bUseClassicDriveGrouping && IsEqualIID(riid, &IID_ICategorizer))
+    {
+        EPCategorizer* epCategorizer = (EPCategorizer*) malloc(sizeof(EPCategorizer));
+        epCategorizer->categorizer = &EPCategorizer_categorizerVtbl;
+        epCategorizer->shellExtInit = &EPCategorizer_shellExtInitVtbl;
+        epCategorizer->ulRefCount = 1;
+        epCategorizer->pShellFolder = NULL;
+
+        *ppvObject = epCategorizer;
+
+        return S_OK;
+    }
+
+    return shell32_DriveTypeCategorizer_CreateInstanceFunc(pUnkOuter, riid, ppvObject);
+}
+
+#pragma endregion
+
+
+#pragma region "Disable ribbon in File Explorer"
+DEFINE_GUID(CLSID_UIRibbonFramework,
+    0x926749FA, 0x2615, 0x4987, 0x88, 0x45, 0xC3, 0x3E, 0x65, 0xF2, 0xB9, 0x57);
+DEFINE_GUID(IID_UIRibbonFramework,
+    0xF4F0385D, 0x6872, 0x43A8, 0xAD, 0x09, 0x4C, 0x33, 0x9C, 0xB3, 0xF5, 0xC5);
+HRESULT ExplorerFrame_CoCreateInstanceHook(REFCLSID rclsid, LPUNKNOWN pUnkOuter, DWORD dwClsContext, REFIID riid, LPVOID* ppv)
+{
+    if (dwFileExplorerCommandUI == 2 && IsEqualCLSID(rclsid, &CLSID_UIRibbonFramework) && IsEqualIID(riid, &IID_UIRibbonFramework))
+    {
+        return REGDB_E_CLASSNOTREG;
+    }
+    return CoCreateInstance(rclsid, pUnkOuter, dwClsContext, riid, ppv);
+}
+#endif
+#pragma endregion
+
+
 #pragma region "Change language UI style"
 #ifdef _WIN64
 DEFINE_GUID(CLSID_InputSwitchControl,
@@ -8554,6 +8899,16 @@ BOOL explorer_RegisterHotkeyHook(HWND hWnd, int id, UINT fsModifiers, UINT vk)
     }
     return RegisterHotKey(hWnd, id, fsModifiers, vk);
 }
+
+BOOL twinui_RegisterHotkeyHook(HWND hWnd, int id, UINT fsModifiers, UINT vk)
+{
+    if (fsModifiers == (MOD_WIN | MOD_NOREPEAT) && vk == 'F')
+    {
+        SetLastError(ERROR_HOTKEY_ALREADY_REGISTERED);
+        return FALSE;
+    }
+    return RegisterHotKey(hWnd, id, fsModifiers, vk);
+}
 #pragma endregion
 
 
@@ -8583,6 +8938,10 @@ HMODULE patched_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlag
 
 
 #pragma region "Fix taskbar thumbnails and acrylic in newer OS builds (22572+)"
+#ifdef _WIN64
+unsigned int (*GetTaskbarColor)(INT64 u1, INT64 u2) = NULL;
+unsigned int (*GetTaskbarTheme)() = NULL;
+
 HRESULT explorer_DwmUpdateThumbnailPropertiesHook(HTHUMBNAIL hThumbnailId, DWM_THUMBNAIL_PROPERTIES* ptnProperties)
 {
     if (ptnProperties->dwFlags == 0 || ptnProperties->dwFlags == DWM_TNP_RECTSOURCE)
@@ -8593,9 +8952,26 @@ HRESULT explorer_DwmUpdateThumbnailPropertiesHook(HTHUMBNAIL hThumbnailId, DWM_T
     return DwmUpdateThumbnailProperties(hThumbnailId, ptnProperties);
 }
 
+BOOL WINAPI explorer_SetWindowCompositionAttribute(HWND hWnd, WINCOMPATTRDATA* pData)
+{
+    if (bClassicThemeMitigations)
+    {
+        return TRUE;
+    }
+    if (bOldTaskbar && global_rovi.dwBuildNumber >= 22581 && GetTaskbarColor && GetTaskbarTheme && 
+        (GetClassWord(hWnd, GCW_ATOM) == RegisterWindowMessageW(L"Shell_TrayWnd") || 
+         GetClassWord(hWnd, GCW_ATOM) == RegisterWindowMessageW(L"Shell_SecondaryTrayWnd")) && 
+        pData->nAttribute == 19 && pData->pData && pData->ulDataSize == sizeof(ACCENTPOLICY))
+    {
+        ACCENTPOLICY* pAccentPolicy = pData->pData;
+        pAccentPolicy->nAccentState = (unsigned __int16)GetTaskbarTheme() >> 8 != 0 ? 4 : 1;
+        pAccentPolicy->nColor = GetTaskbarColor(0, 0);
+    }
+    return SetWindowCompositionAttribute(hWnd, pData);
+}
+
 void PatchExplorer_UpdateWindowAccentProperties()
 {
-#ifdef _WIN64
     HMODULE hExplorer = GetModuleHandleW(NULL);
     if (hExplorer)
     {
@@ -8607,7 +8983,15 @@ void PatchExplorer_UpdateWindowAccentProperties()
             {
                 char* pPatchArea = NULL;
                 // test al, al; jz rip+0x11; and ...
-                char pattern1[6] = { 0x84, 0xC0, 0x74, 0x11, 0x83, 0x65 };
+                char p1[] = { 0x84, 0xC0, 0x74, 0x11, 0x83, 0x65 };
+                char p2[] = { 0xF3, 0xF3, 0xF3, 0xFF };
+                char* pattern1 = p1;
+                int sizeof_pattern1 = 6;
+                if (global_rovi.dwBuildNumber >= 22581)
+                {
+                    pattern1 = p2;
+                    sizeof_pattern1 = 4;
+                }
                 BOOL bTwice = FALSE;
                 PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(ntHeader);
                 for (unsigned int i = 0; i < ntHeader->FileHeader.NumberOfSections; ++i)
@@ -8623,7 +9007,7 @@ void PatchExplorer_UpdateWindowAccentProperties()
                                     !pCandidate ? hExplorer + section->VirtualAddress : pCandidate,
                                     !pCandidate ? section->SizeOfRawData : (uintptr_t)section->SizeOfRawData - (uintptr_t)(pCandidate - (hExplorer + section->VirtualAddress)),
                                     pattern1,
-                                    sizeof(pattern1)
+                                    sizeof_pattern1
                                 );
                                 if (!pCandidate)
                                 {
@@ -8637,7 +9021,7 @@ void PatchExplorer_UpdateWindowAccentProperties()
                                 {
                                     bTwice = TRUE;
                                 }
-                                pCandidate += sizeof(pattern1);
+                                pCandidate += sizeof_pattern1;
                             }
                         }
                     }
@@ -8645,15 +9029,79 @@ void PatchExplorer_UpdateWindowAccentProperties()
                 }
                 if (pPatchArea && !bTwice)
                 {
-                    DWORD dwOldProtect;
-                    VirtualProtect(pPatchArea, sizeof(pattern1), PAGE_EXECUTE_READWRITE, &dwOldProtect);
-                    pPatchArea[2] = 0xEB; // replace jz with jmp
-                    VirtualProtect(pPatchArea, sizeof(pattern1), dwOldProtect, &dwOldProtect);
+                    if (global_rovi.dwBuildNumber >= 22581)
+                    {
+                        int dec_size = 200;
+                        _DecodedInst* decodedInstructions = calloc(110, sizeof(_DecodedInst));
+                        if (decodedInstructions)
+                        {
+                            unsigned int decodedInstructionsCount = 0;
+                            _DecodeResult res = distorm_decode(0, (const unsigned char*)(pPatchArea - dec_size), dec_size + 20, Decode64Bits, decodedInstructions, 100, &decodedInstructionsCount);
+                            int status = 0;
+                            for (int i = decodedInstructionsCount - 1; i >= 0; i--)
+                            {
+                                if (status == 0 && strstr(decodedInstructions[i].instructionHex.p, "f3f3f3ff"))
+                                {
+                                    status = 1;
+                                }
+                                else if (status == 1 && !strcmp(decodedInstructions[i].instructionHex.p, "c3"))
+                                {
+                                    status = 2;
+                                }
+                                else if (status == 2 && strcmp(decodedInstructions[i].instructionHex.p, "cc"))
+                                {
+                                    GetTaskbarColor = pPatchArea - dec_size + decodedInstructions[i].offset;
+                                    status = 3;
+                                }
+                                else if (status == 3 && !strncmp(decodedInstructions[i].instructionHex.p, "e8", 2))
+                                {
+                                    status = 4;
+                                }
+                                else if (status == 4 && !strncmp(decodedInstructions[i].instructionHex.p, "e8", 2))
+                                {
+                                    uint32_t* off = pPatchArea - dec_size + decodedInstructions[i].offset + 1;
+                                    GetTaskbarTheme = pPatchArea - dec_size + decodedInstructions[i].offset + decodedInstructions[i].size + (*off);
+                                    break;
+                                }
+                                if (status >= 2)
+                                {
+                                    i = i + 2;
+                                    if (i >= decodedInstructionsCount)
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                            if (SetWindowCompositionAttribute && GetTaskbarColor && GetTaskbarTheme)
+                            {
+                                VnPatchIAT(GetModuleHandleW(NULL), "user32.dll", "SetWindowCompositionAttribute", explorer_SetWindowCompositionAttribute);
+                                printf("Patched taskbar transparency in newer OS builds\n");
+                            }
+                            free(decodedInstructions);
+                        }
+                    }
+                    else
+                    {
+                        DWORD dwOldProtect;
+                        VirtualProtect(pPatchArea, sizeof_pattern1, PAGE_EXECUTE_READWRITE, &dwOldProtect);
+                        pPatchArea[2] = 0xEB; // replace jz with jmp
+                        VirtualProtect(pPatchArea, sizeof_pattern1, dwOldProtect, &dwOldProtect);
+                    }
                 }
             }
         }
     }
+}
 #endif
+#pragma endregion
+
+
+#pragma region "Revert legacy copy dialog"
+BOOL(*SHELL32_CanDisplayWin8CopyDialogFunc)();
+BOOL SHELL32_CanDisplayWin8CopyDialogHook()
+{
+    if (bLegacyFileTransferDialog) return FALSE;
+    return SHELL32_CanDisplayWin8CopyDialogFunc();
 }
 #pragma endregion
 
@@ -8901,6 +9349,9 @@ DWORD Inject(BOOL bIsExplorer)
 
     if (bIsExplorer)
     {
+#ifdef _WIN64
+        InitializeCriticalSection(&lock_epw);
+#endif
         wszWeatherLanguage = malloc(sizeof(WCHAR) * MAX_PATH);
         wszWeatherTerm = malloc(sizeof(WCHAR) * MAX_PATH);
     }
@@ -9392,12 +9843,17 @@ DWORD Inject(BOOL bIsExplorer)
     printf("Setup twinui.pcshell functions done\n");
 
 
+
+    HANDLE hTwinui = LoadLibraryW(L"twinui.dll");
     if (!IsWindows11())
     {
-        HANDLE hTwinui = LoadLibraryW(L"twinui.dll");
         VnPatchIAT(hTwinui, "user32.dll", "TrackPopupMenu", twinui_TrackPopupMenuHook);
-        printf("Setup twinui functions done\n");
     }
+    if (bDisableWinFHotkey)
+    {
+        VnPatchIAT(hTwinui, "user32.dll", "RegisterHotKey", twinui_RegisterHotkeyHook);
+    }
+    printf("Setup twinui functions done\n");
 
 
     HANDLE hStobject = LoadLibraryW(L"stobject.dll");
@@ -9455,9 +9911,10 @@ DWORD Inject(BOOL bIsExplorer)
 #endif
 
 
-    HANDLE hShell32 = GetModuleHandleW(L"shell32.dll");
+    hShell32 = GetModuleHandleW(L"shell32.dll");
     if (hShell32)
     {
+        // Patch ribbon to handle redirects to classic CPLs
         HRESULT(*SHELL32_Create_IEnumUICommand)(IUnknown*, int*, int, IUnknown**) = GetProcAddress(hShell32, (LPCSTR)0x2E8);
         if (SHELL32_Create_IEnumUICommand)
         {
@@ -9489,9 +9946,48 @@ DWORD Inject(BOOL bIsExplorer)
                 }
             }
         }
+
+        // Allow clasic drive groupings in This PC
+        HRESULT(*SHELL32_DllGetClassObject)(REFCLSID rclsid, REFIID riid, LPVOID* ppv) = GetProcAddress(hShell32, "DllGetClassObject");
+        if (SHELL32_DllGetClassObject)
+        {
+            IClassFactory* pClassFactory = NULL;
+            SHELL32_DllGetClassObject(&CLSID_DriveTypeCategorizer, &IID_IClassFactory, &pClassFactory);
+
+            if (pClassFactory)
+            {
+                //DllGetClassObject hands out a unique "factory entry" data structure for each type of CLSID, containing a pointer to an IClassFactoryVtbl as well as some other members including
+                //the _true_ create instance function that should be called (in this instance, shell32!CDriveTypeCategorizer_CreateInstance). When the IClassFactory::CreateInstance method is called,
+                //shell32!ECFCreateInstance will cast the IClassFactory* passed to it back into a factory entry, and then invoke the pfnCreateInstance function defined in that entry directly.
+                //Thus, rather than hooking the shared shell32!ECFCreateInstance function found on the IClassFactoryVtbl* shared by all class objects returned by shell32!DllGetClassObject, we get the real
+                //CreateInstance function that will be called and hook that instead
+                Shell32ClassFactoryEntry* pClassFactoryEntry = (Shell32ClassFactoryEntry*)pClassFactory;
+
+                DWORD flOldProtect = 0;
+
+                if (VirtualProtect(pClassFactoryEntry, sizeof(Shell32ClassFactoryEntry), PAGE_EXECUTE_READWRITE, &flOldProtect))
+                {
+                    shell32_DriveTypeCategorizer_CreateInstanceFunc = pClassFactoryEntry->pfnCreateInstance;
+                    pClassFactoryEntry->pfnCreateInstance = shell32_DriveTypeCategorizer_CreateInstanceHook;
+                    VirtualProtect(pClassFactoryEntry, sizeof(Shell32ClassFactoryEntry), flOldProtect, &flOldProtect);
+                }
+
+                pClassFactory->lpVtbl->Release(pClassFactory);
+            }
+        }
     }
     printf("Setup shell32 functions done\n");
 
+
+    HANDLE hExplorerFrame = GetModuleHandleW(L"ExplorerFrame.dll");
+    VnPatchIAT(hExplorerFrame, "api-ms-win-core-com-l1-1-0.dll", "CoCreateInstance", ExplorerFrame_CoCreateInstanceHook);
+    printf("Setup explorerframe functions done\n");
+
+
+    HANDLE hWindowsStorage = LoadLibraryW(L"windows.storage.dll");
+    SHELL32_CanDisplayWin8CopyDialogFunc = GetProcAddress(hShell32, "SHELL32_CanDisplayWin8CopyDialog");
+    if (SHELL32_CanDisplayWin8CopyDialogFunc) VnPatchDelayIAT(hWindowsStorage, "ext-ms-win-shell-exports-internal-l1-1-0.dll", "SHELL32_CanDisplayWin8CopyDialog", SHELL32_CanDisplayWin8CopyDialogHook);
+    printf("Setup windows.storage functions done\n");
 
 
     if (IsWindows11())
@@ -9528,7 +10024,6 @@ DWORD Inject(BOOL bIsExplorer)
         VnPatchIAT(hPeopleBand, "api-ms-win-core-largeinteger-l1-1-0.dll", "MulDiv", PeopleBand_MulDivHook);
         printf("Setup peopleband functions done\n");
     }
-
 
 
 
@@ -9641,7 +10136,7 @@ DWORD Inject(BOOL bIsExplorer)
 
 
 
-    CreateThread(
+    hServiceWindowThread = CreateThread(
         0,
         0,
         EP_ServiceWindowThread,
@@ -9657,6 +10152,7 @@ DWORD Inject(BOOL bIsExplorer)
     {
         VnPatchIAT(hExplorer, "user32.dll", "RegisterHotKey", explorer_RegisterHotkeyHook);
     }
+
 
 
     if (bEnableArchivePlugin)

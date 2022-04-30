@@ -2,6 +2,24 @@
 
 This document includes the same release notes as in the [Releases](https://github.com/valinet/ExplorerPatcher/releases) section on GitHub.
 
+## 22000.613.44
+
+Tested on OS build 22000.613.
+
+Please make sure you are connected to the Internet while installing, the application might need to perform one-time downloads for several resources in order to enable full functionality.
+
+#### Details
+
+##### 1
+
+* Option to disable Win+F (Feedback Hub) hotkey
+* Built-in support for OS build 22000.613
+
+##### 2
+
+* Weather: Fixed a bug that had "COM Surrogate" display as a running app in Task Manager after the widget flyout was opened the first time
+* Weather: Fixed a bug that could hang or lock the shutdown/restart/sign out process when using the weather widget
+
 ## 22000.556.43
 
 Tested on OS build 22000.556.
@@ -9,6 +27,19 @@ Tested on OS build 22000.556.
 Please make sure you are connected to the Internet while installing, the application might need to perform one-time downloads for several resources in order to enable full functionality.
 
 #### Details
+
+##### 4
+
+* Option to enable legacy file transfer dialog
+
+##### 3
+
+* Option to enable classic drive groupings in This PC (thanks @lordmilko)
+* Choice of Windows 11 Command Bar, Windows 10 Ribbon or Windows 7 Command Bar for File Explorer windows
+
+##### 2
+
+* Fixed Windows 10 taskbar showing fully transparent instead of the acrylic effect on newer OS builds (22581+)
 
 ##### 1
 

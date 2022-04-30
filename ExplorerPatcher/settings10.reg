@@ -142,6 +142,21 @@
 ;https://github.com/valinet/ExplorerPatcher/wiki/Using-ExplorerPatcher-as-shell-extension
 ;q
 [HKEY_CURRENT_USER\Software\ExplorerPatcher]
+;b Register as shell extension
+;"Virtualized_{D17F1E1A-5919-4427-8F89-A1A8503CA3EB}_RegisterAsShellExtension"=dword:00000000
+[HKEY_CURRENT_USER\Software\ExplorerPatcher]
+;b Always use legacy file transfer dialog
+"LegacyFileTransferDialog"=dword:00000000
+[HKEY_CURRENT_USER\Software\ExplorerPatcher]
+;b Use classic drive groupings in This PC
+"UseClassicDriveGrouping"=dword:00000000
+[HKEY_CURRENT_USER\Software\ExplorerPatcher]
+;c 2 Control Interface
+;x 0 Windows 10 Ribbon (default)
+;x 2 Windows 7 Command Bar
+"FileExplorerCommandUI"=dword:00000000
+;t The following settings take effect on newly created File Explorer windows:
+[HKEY_CURRENT_USER\Software\ExplorerPatcher]
 ;i Use immersive menus when displaying Windows 10 context menus **
 "DisableImmersiveContextMenu"=dword:00000000
 [-HKEY_CURRENT_USER\Software\Classes\CLSID\{056440FD-8568-48e7-A632-72157243B55B}\InprocServer32]
@@ -156,9 +171,6 @@
 ;p 2
 ;b Mica effect on title bar
 "MicaEffectOnTitlebar"=dword:00000000
-[HKEY_CURRENT_USER\Software\ExplorerPatcher]
-;b Register as shell extension
-;"Virtualized_{D17F1E1A-5919-4427-8F89-A1A8503CA3EB}_RegisterAsShellExtension"=dword:00000000
 
 
 ;T Start menu
@@ -462,6 +474,8 @@
 "NoMenuAccelerator"=dword:00000000
 ;b Disable Office hotkeys (Ctrl+Alt+Shift+Windows key combinations) *
 "DisableOfficeHotkeys"=dword:00000000
+;b Disable Win+F (Feedback Hub) hotkey *
+"DisableWinFHotkey"=dword:00000000
 [HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced]
 ;c 6 Default action in the Alt+F4 dialog on the desktop
 ;x 256 Switch user
