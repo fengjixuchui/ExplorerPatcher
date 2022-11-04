@@ -246,6 +246,16 @@ DWORD DownloadSymbols(DownloadSymbolsParams* params)
             VirtualProtect(twinui_pcshell_SN, sizeof(twinui_pcshell_SN), flOldProtect, &flOldProtect);
         }
     }
+    if (IsWindows11Version22H2OrHigher())
+    {
+        DWORD flOldProtect = 0;
+        if (VirtualProtect(twinui_pcshell_SN, sizeof(twinui_pcshell_SN), PAGE_EXECUTE_READWRITE, &flOldProtect))
+        {
+            twinui_pcshell_SN[7] = "CMultitaskingViewManager::_CreateXamlMTVHost";
+            twinui_pcshell_SN[TWINUI_PCSHELL_SB_CNT - 1] = "CMultitaskingViewManager::_CreateDCompMTVHost";
+            VirtualProtect(twinui_pcshell_SN, sizeof(twinui_pcshell_SN), flOldProtect, &flOldProtect);
+        }
+    }
     if (VnGetSymbols(
         szSettingsPath,
         symbols_PTRS.twinui_pcshell_PTRS,
@@ -845,6 +855,45 @@ BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule)
         symbols_PTRS->twinui_pcshell_PTRS[8] = 0x3bc70;
         bIsTwinuiPcshellHardcoded = TRUE;
     }
+    else if (!_stricmp(hash, "18ae53a66cb941f5bba8411a8f245e0c")) // 675
+    {
+        symbols_PTRS->twinui_pcshell_PTRS[0] = 0x227fa6;
+        symbols_PTRS->twinui_pcshell_PTRS[1] = 0x5cd4b0;
+        symbols_PTRS->twinui_pcshell_PTRS[2] = 0x5eb5f8;
+        symbols_PTRS->twinui_pcshell_PTRS[3] = 0x5ebe00;
+        symbols_PTRS->twinui_pcshell_PTRS[4] = 0x5d05f0;
+        symbols_PTRS->twinui_pcshell_PTRS[5] = 0x5d02a4;
+        symbols_PTRS->twinui_pcshell_PTRS[6] = 0x5ce8c0;
+        symbols_PTRS->twinui_pcshell_PTRS[7] = 0x5ecbbc;
+        symbols_PTRS->twinui_pcshell_PTRS[8] = 0x4a7e0;
+        bIsTwinuiPcshellHardcoded = TRUE;
+    }
+    else if (!_stricmp(hash, "b6d42f3599df7caf5b0da775e725d963")) // 708
+    {
+        symbols_PTRS->twinui_pcshell_PTRS[0] = 0x227cb6;
+        symbols_PTRS->twinui_pcshell_PTRS[1] = 0x5cd600;
+        symbols_PTRS->twinui_pcshell_PTRS[2] = 0x5eb748;
+        symbols_PTRS->twinui_pcshell_PTRS[3] = 0x5ebf50;
+        symbols_PTRS->twinui_pcshell_PTRS[4] = 0x5d0740;
+        symbols_PTRS->twinui_pcshell_PTRS[5] = 0x5d03f4;
+        symbols_PTRS->twinui_pcshell_PTRS[6] = 0x5cea10;
+        symbols_PTRS->twinui_pcshell_PTRS[7] = 0x5ecd0c;
+        symbols_PTRS->twinui_pcshell_PTRS[8] = 0x4a7b0;
+        bIsTwinuiPcshellHardcoded = TRUE;
+    }
+    else if (!_stricmp(hash, "93dbd7bfcb21d2449bc0eb10d6e3f6ab")) // 778
+    {
+        symbols_PTRS->twinui_pcshell_PTRS[0] = 0x2291b6;
+        symbols_PTRS->twinui_pcshell_PTRS[1] = 0x5ce700;
+        symbols_PTRS->twinui_pcshell_PTRS[2] = 0x5ec688;
+        symbols_PTRS->twinui_pcshell_PTRS[3] = 0x5ece90;
+        symbols_PTRS->twinui_pcshell_PTRS[4] = 0x5d1684;
+        symbols_PTRS->twinui_pcshell_PTRS[5] = 0x5d1338;
+        symbols_PTRS->twinui_pcshell_PTRS[6] = 0x5cf890;
+        symbols_PTRS->twinui_pcshell_PTRS[7] = 0x5edc4c;
+        symbols_PTRS->twinui_pcshell_PTRS[8] = 0x49de0;
+        bIsTwinuiPcshellHardcoded = TRUE;
+    }
     if (bIsTwinuiPcshellHardcoded)
     {
         printf("[Symbols] Identified known \"" TWINUI_PCSHELL_SB_NAME ".dll\" with hash %s.\n", hash);
@@ -878,6 +927,24 @@ BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule)
         symbols_PTRS->startdocked_PTRS[2] = 0x187ba0;
         symbols_PTRS->startdocked_PTRS[3] = 0x3c00;
         symbols_PTRS->startdocked_PTRS[4] = 0x16156c;
+        bIsStartHardcoded = TRUE;
+    }
+    else if (!_stricmp(hash, "7f6d03e316dfca4ee61a89b51b453d82") || !_stricmp(hash, "1b727beb3cafc0ce0e928ccfae4b8e8f")) // 675, 708
+    {
+        symbols_PTRS->startdocked_PTRS[0] = 0x189a7c;
+        symbols_PTRS->startdocked_PTRS[1] = 0x189a7c;
+        symbols_PTRS->startdocked_PTRS[2] = 0x187ce0;
+        symbols_PTRS->startdocked_PTRS[3] = 0x3c00;
+        symbols_PTRS->startdocked_PTRS[4] = 0x1616ac;
+        bIsStartHardcoded = TRUE;
+    }
+    else if (!_stricmp(hash, "a7745c7fabca519e865a559bb7e13ed9")) // 778
+    {
+        symbols_PTRS->startdocked_PTRS[0] = 0x19a910;
+        symbols_PTRS->startdocked_PTRS[1] = 0x19a910;
+        symbols_PTRS->startdocked_PTRS[2] = 0x198a70;
+        symbols_PTRS->startdocked_PTRS[3] = 0x4480;
+        symbols_PTRS->startdocked_PTRS[4] = 0x170ddc;
         bIsStartHardcoded = TRUE;
     }
     if (bIsStartHardcoded)
@@ -944,9 +1011,14 @@ BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule)
     GetWindowsDirectoryW(wszPath, MAX_PATH);
     wcscat_s(wszPath, MAX_PATH, L"\\SystemApps\\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\\" TEXT(STARTUI_SB_NAME) L".dll");
     ComputeFileHash(wszPath, hash, 100);
-    if (!_stricmp(hash, "2768cc6cc7f686b2aa084cb5c8cce65d") || !_stricmp(hash, "a7c82cb9a9fd6f87897fc8a737d6b4d7")) // 493, 527, 556, 613
+    if (!_stricmp(hash, "2768cc6cc7f686b2aa084cb5c8cce65d") || !_stricmp(hash, "a7c82cb9a9fd6f87897fc8a737d6b4d7")) // 493, 527, 556, 613, 675
     {
         symbols_PTRS->startui_PTRS[0] = 0x37180;
+        bIsStartHardcoded = TRUE;
+    }
+    else if (!_stricmp(hash, "bab11b2d1dca6b167f313f4d54de2b7d") || !_stricmp(hash, "0c1b88f888d9073c505d7f47724132c8")) // 708, 778
+    {
+        symbols_PTRS->startui_PTRS[0] = 0x37120;
         bIsStartHardcoded = TRUE;
     }
     if (bIsStartHardcoded)
@@ -1062,6 +1134,17 @@ BOOL LoadSymbols(symbols_addr* symbols_PTRS, HMODULE hModule)
             &(symbols_PTRS->twinui_pcshell_PTRS[7]),
             &dwSize
         );
+        if (IsWindows11Version22H2OrHigher())
+        {
+            RegQueryValueExW(
+                hKey,
+                TEXT(TWINUI_PCSHELL_SB_LAST),
+                0,
+                NULL,
+                &(symbols_PTRS->twinui_pcshell_PTRS[TWINUI_PCSHELL_SB_CNT - 1]),
+                &dwSize
+            );
+        }
         RegCloseKey(hKey);
 
         if (IsWindows11())

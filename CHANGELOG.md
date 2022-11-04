@@ -2,6 +2,158 @@
 
 This document includes the same release notes as in the [Releases](https://github.com/valinet/ExplorerPatcher/releases) section on GitHub.
 
+## 22621.608.51
+
+Tested on OS builds 22621.608 and 22000.1042.
+
+Please make sure you are connected to the Internet while installing, the application might need to perform one-time downloads for several resources in order to enable full functionality.
+
+#### Details
+
+##### 1
+
+* Fixed a bug that could prevent the Windows 10 network or battery flyouts from showing on OS build 22000.
+* Fixed the Windows 10 network and battery flyouts on OS build 22621.
+* Weather: Fixed a bug that displayed the widget contents with incorrect left padding.
+
+##### 2
+
+* sws: Support for changing selection in window list using the mouse wheel (suggestion by andrewz).
+* Fix broken "Cascade windows", "Show windows stacked", "Show windows side by side", and "Undo ..." options in taskbar context menu (reported by iamk9008).
+
+##### 3
+
+* sws: Option to have the scroll wheel change the selection when using the switcher:
+  * "Never" (default), the same behavior as two versions ago, which means that, when the switcher is active, it does not react to the scroll wheel being used.
+  * "When cursor is over the switcher" has the switcher react to the scroll whell and advance/reverse the selection only when the cursor is above the switcher
+  * "Always" has the switcher react to the scroll whell and advance/reverse the selection regardless of where the cursor is placed. In this mode, background applications won't receive scroll wheel updates until the switcher is closed, regardless of the "Scroll inactive windows when hovering over them" setting from Windows.
+* sws: Fixed a bug that had the scroll wheel move selections in the opposite direction compared to Windows 7 Alt-Tab's behavior. When enabled, the scrolling up selects the previous window in the list, while scrolling down selects the next window in the list. To obtain the previous behavior, which is to scroll up to select the next window, and to scroll down to select the previous window, set `ScrollWheelInvert` to `1` in `HKCU\Software\ExplorerPatcher\sws` (5cef3b1).
+* sws: Fixed a bug that could unexpectedly move the switcher to another monitor when your cursor was placed on the other monitor, the option to have the switcher display on the monitor the cursor is placed on is enabled and the switcher finished refreshing its data in the background (https://github.com/valinet/sws/commit/8b68539201102801367ef8f3716b9f1260e2dbe5).
+* sws: Fixed a bug that could prevent hotkey associations from being properly cleaned up when you disabled the setting to have a per-application window list (https://github.com/valinet/sws/commit/c5776e5a6a0c5495892a15e16a1def31b225fc51).
+* sws: Fixed a bug that could prevent correct reload of settings when entries were directly deleted from the registry (cbc5f19).
+
+## 22622.450.50
+
+Tested on OS build 22622.450.
+
+Please make sure you are connected to the Internet while installing, the application might need to perform one-time downloads for several resources in order to enable full functionality.
+
+#### Details
+
+##### 1
+
+* Support for OS builds 22621+. Read more [here](https://github.com/valinet/ExplorerPatcher/issues/1082#issuecomment-1206690333).
+* Added an option to shrink address bar height in File Explorer windows (thanks @krlvm).
+
+##### 2
+
+* Support for disabling the modern search bar in 32-bit applications as well (thanks @krlvm).
+* Fixed a bug that could prevent deleting registry keys when the application was supposed to (for example, when uninstalling or toggling certain settings).
+
+##### 3
+
+* Fixed incorrect check for running dwm instances in `ep_dwm`
+* Fixed a use-after-free bug in `ep_dwm` (thanks @ibhk)
+
+## 22000.795.48
+
+Tested on OS build 22000.795.
+
+Please make sure you are connected to the Internet while installing, the application might need to perform one-time downloads for several resources in order to enable full functionality.
+
+#### Details
+
+##### 1
+
+* Weather: Fixed a bug that could hang the widget and lead to an infinite loop with the program using an entire CPU core when the computer resumed from sleep or hibernation.
+* Weather: Fixed a bug that had the widget display the error page when the computer lost network connectivity; instead, now the widget continues to display the cached data from the previous refresh (if any).
+
+##### 2
+
+* Weather: Fixed a bug that could hang explorer and the weather widget host process under certain circumstances, for example, when explorer restarted.
+
+## 22000.778.47
+
+Tested on OS build 22000.778.
+
+Please make sure you are connected to the Internet while installing, the application might need to perform one-time downloads for several resources in order to enable full functionality.
+
+#### Details
+
+##### 1
+
+* Built-in support for OS build 22000.778.
+* Fixed a bug that had the Start button context menu / Win-X menu / power user menu fail to display and potentially lock the shell on OS builds 22000.778+ and 22621+
+
+##### 2
+
+* Fixed a system high DPI-related bug that caused wide Windows 10 taskbar buttons and incorrect (desktop) icon spacing
+
+## 22000.708.46
+
+Tested on OS build 22000.708.
+
+Please make sure you are connected to the Internet while installing, the application might need to perform one-time downloads for several resources in order to enable full functionality.
+
+#### Details
+
+##### 1
+
+* Built-in support for OS build 22000.708.
+* Added configuration options for the new Windows Spotlight desktop background feature, including:
+  * Hide the "Learn about this picture" icon
+  * Choose which items from the Windows spotlight icon context menu to have replicated in the desktop context menu (legacy context menu only)
+  * Set a schedule for "Switch to next picture"
+  * Manipulate the feature from the Properties UI, bypassing the desktop icon
+* The Properties UI hides sections that are not applicable to your current settings; for example, the "Weather" tab is not displayed if you've selected the Windows 11 taskbar, as none of the options in there apply when in this mode.
+
+##### 2
+
+* sws: Fixed a bug that created unnecessary paint events when a window was flashing and the switcher is not shown
+
+##### 3
+
+* Added option to hide the "Show desktop" button, but still retain its functionality, when using the Windows 10 taskbar
+* Fixed a bug in Windows 10 where the Start menu was displayed centered by default
+
+##### 4
+
+* Weather: Show "Reload" link when data fails to load (thanks Varun A. for the suggestion)
+* sws: Draw placeholder thumbnail when a proper thumbnail cannot be obtained (for example, due to a window having an invalid width or height)
+* sws: Fixed a bug that could prevent the switcher from identifying when the desktop is in the foreground
+* sws: Fixed a regression that could prevent the switcher from properly detecting foreground window changes
+* sws: Fixed a bug that made very small windows have a rectangle area too small for properly working with in the switcher
+
+##### 5
+
+* Fixed a bug that could prevent Control Panel link redirection from working correctly
+* Weather: Fixed a bug that prevented the widget from working when WebView2 Runtime >= 102.0.1245.33
+
+##### 6
+
+* Fix a bug in the Properties window that had the it fail to display some sections under default settings
+  
+## 22000.675.45
+
+Tested on OS build 22000.675.
+
+Please make sure you are connected to the Internet while installing, the application might need to perform one-time downloads for several resources in order to enable full functionality.
+
+#### Details
+
+##### 1
+
+* sws: Fixed a bug that displayed a wrong window to switch to when a background application was denied the request to have the foreground window by the OS (#1084)
+
+##### 2
+
+* libvalinet: Fixed a memory leak in `toast.h`
+* sws: Fixed a bug that caused the switcher to display non-responsive (hung) immersive (UWP) windows twice in the list
+
+##### 3
+
+* sws: Fixed a bug that created unnecessary paint events when a window was flashing and the switcher is not shown
+
 ## 22000.613.44
 
 Tested on OS build 22000.613.
